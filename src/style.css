@@ -1,0 +1,93 @@
+/* LUMIST 教育品牌主题：黄主色 + 蓝灰辅助，层次分明 */
+:root {
+  /* 主色：LUMIST 黄（主按钮、当前导航、关键 CTA） */
+  --el-color-primary: #e8b724;
+  --el-color-primary-rgb: 232, 183, 36;
+  --el-color-primary-light-1: #ebc241;
+  --el-color-primary-light-2: #eecd5e;
+  --el-color-primary-light-3: #f0c83d;
+  --el-color-primary-light-4: #f3d355;
+  --el-color-primary-light-5: #f5d96d;
+  --el-color-primary-light-6: #f7e085;
+  --el-color-primary-light-7: #f9eaba;
+  --el-color-primary-light-8: #fbf3d4;
+  --el-color-primary-light-9: #fdf8e8;
+  --el-color-primary-dark-2: #ba9220;
+  /* 辅助色：蓝灰（链接、次要强调、输入框 focus、导航悬停） */
+  --lumist-secondary: #5b7c9a;
+  --lumist-secondary-light: #e8eef4;
+  --lumist-secondary-rgb: 91, 124, 154;
+  /* 中性背景，不偏黄 */
+  --lumist-bg: #f2f4f6;
+  --lumist-bg-warm: #faf9f7;
+}
+
+:root {
+  font-family: "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #1f2329;
+  background-color: var(--lumist-bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background-color: var(--lumist-bg);
+}
+
+#app {
+  min-height: 100vh;
+}
+
+/* 页面内容区：统一内边距与最大宽度，基础响应式 */
+.page {
+  padding: 24px;
+  width: 100%;
+}
+
+@media (min-width: 1200px) {
+  .page {
+    max-width: 1200px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+}
+
+@media (max-width: 768px) {
+  .page {
+    padding: 16px;
+  }
+}
+
+/* 全局卡片与按钮禁用态增强 */
+.el-card {
+  border-radius: 8px;
+}
+
+.el-button:disabled,
+.el-button.is-disabled {
+  opacity: 0.6;
+}
+
+/* 分页组件小屏适配 */
+@media (max-width: 768px) {
+  .el-pagination {
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .el-pagination .el-pagination__sizes,
+  .el-pagination .el-pagination__jump {
+    margin-top: 8px;
+  }
+}
