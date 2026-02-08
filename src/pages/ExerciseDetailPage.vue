@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Loading } from '@element-plus/icons-vue'
+import { ArrowLeft, Loading } from '@element-plus/icons-vue'
 import type {
   Difficulty,
   ExerciseDetail,
@@ -12,7 +12,12 @@ import type {
 import { getExerciseDetail, submitExercise } from '../services/exercises'
 
 const route = useRoute()
+const router = useRouter()
 const exerciseId = computed(() => route.params.exerciseId as string)
+
+const handleBack = () => {
+  router.push('/exercises')
+}
 
 const loading = ref(true)
 const initError = ref(false)
@@ -76,6 +81,13 @@ const initAnswers = () => {
   })
 }
 
+/** 多选题答案：字符串 <-> 数组转换 */
+const getMultiAnswer = (q: Question) =>
+  (answers[q.questionId] ?? '').split(',').filter(Boolean)
+const setMultiAnswer = (q: Question, val: string[]) => {
+  answers[q.questionId] = val.join(',')
+}
+
 const goToQuestion = (index: number) => {
   currentIndex.value = Math.max(0, Math.min(index, questions.value.length - 1))
 }
@@ -106,6 +118,17 @@ const getResult = (questionId: string) => {
 
 const getOptionKeys = (q: Question) =>
   q.options ? Object.keys(q.options).sort() : []
+
+/** 判断题选项：当 options 为空时使用固定选项 */
+const getTrueFalseOptions = (q: Question) => {
+  if (q.options && Object.keys(q.options).length > 0) {
+    return Object.entries(q.options).sort(([a], [b]) => a.localeCompare(b))
+  }
+  return [
+    ['正确', '正确'],
+    ['错误', '错误'],
+  ] as [string, string][]
+}
 
 watch(questions, (q) => {
   if (q.length > 0) initAnswers()
@@ -145,7 +168,11 @@ onBeforeUnmount(() => {
     <el-card v-else v-loading="loading">
       <template #header>
         <div class="card-header">
-          <div>
+          <el-button text class="back-btn" @click="handleBack">
+            <el-icon><ArrowLeft /></el-icon>
+            返回
+          </el-button>
+          <div class="card-title-area">
             <div class="title">{{ detail?.title || '练习作答' }}</div>
             <div class="meta">
               <el-tag size="small">{{ difficultyMap[detail?.difficulty ?? 'medium'] }}</el-tag>
@@ -235,14 +262,44 @@ onBeforeUnmount(() => {
 
             <!-- 单选题 -->
             <div v-if="currentQuestion.type === 'single_choice'" class="options">
-              <el-radio-group v-model="answers[currentQuestion.questionId]">
-                <el-radio
+              <el-radio-group v-model="answers[currentQuestion.questionId]" class="option-btns">
+                <el-radio-button
                   v-for="key in getOptionKeys(currentQuestion)"
                   :key="key"
                   :label="key"
                 >
                   {{ key }}. {{ currentQuestion.options?.[key] ?? '' }}
-                </el-radio>
+                </el-radio-button>
+              </el-radio-group>
+            </div>
+
+            <!-- 多选题 -->
+            <div v-else-if="currentQuestion.type === 'multiple_choice'" class="options">
+              <el-checkbox-group
+                :model-value="getMultiAnswer(currentQuestion)"
+                @update:model-value="setMultiAnswer(currentQuestion, $event)"
+                class="option-btns"
+              >
+                <el-checkbox-button
+                  v-for="key in getOptionKeys(currentQuestion)"
+                  :key="key"
+                  :label="key"
+                >
+                  {{ key }}. {{ currentQuestion.options?.[key] ?? '' }}
+                </el-checkbox-button>
+              </el-checkbox-group>
+            </div>
+
+            <!-- 判断题 -->
+            <div v-else-if="currentQuestion.type === 'true_false'" class="options">
+              <el-radio-group v-model="answers[currentQuestion.questionId]" class="option-btns">
+                <el-radio-button
+                  v-for="[value, label] in getTrueFalseOptions(currentQuestion)"
+                  :key="value"
+                  :label="value"
+                >
+                  {{ label }}
+                </el-radio-button>
               </el-radio-group>
             </div>
 
@@ -295,6 +352,20 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+.back-btn {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.card-title-area {
+  flex: 1;
+}
 .exercise-detail-page .card-header .title {
   font-weight: 600;
 }
@@ -391,9 +462,27 @@ onBeforeUnmount(() => {
   background: #fafafa;
   border-radius: 8px;
 }
-.options :deep(.el-radio) {
-  display: block;
-  margin-bottom: 12px;
+.options .option-btns {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.options .option-btns :deep(.el-radio-button),
+.options .option-btns :deep(.el-checkbox-button) {
+  margin-right: 0;
+}
+
+.options .option-btns :deep(.el-radio-button__inner),
+.options .option-btns :deep(.el-checkbox-button__inner) {
+  width: 100%;
+  text-align: left;
+  justify-content: flex-start;
+  padding: 12px 16px;
+  white-space: normal;
+  height: auto;
+  line-height: 1.5;
 }
 .input-wrap {
   margin-top: 12px;

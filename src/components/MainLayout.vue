@@ -33,7 +33,9 @@ const handleLogout = () => {
   <div class="main-layout">
     <header class="layout-header">
       <div class="layout-header-inner">
-        <router-link to="/dashboard" class="logo">LUMIST 学生端</router-link>
+        <router-link to="/dashboard" class="logo">
+          <img src="/image.svg" alt="LUMIST" class="logo-img" />
+        </router-link>
         <nav class="nav">
           <router-link
             v-for="item in navItems"
@@ -85,14 +87,14 @@ const handleLogout = () => {
   gap: 24px;
 }
 .logo {
-  font-weight: 600;
-  font-size: 18px;
-  color: #1f2329;
+  display: flex;
+  align-items: center;
   text-decoration: none;
-  white-space: nowrap;
 }
-.logo:hover {
-  color: var(--lumist-secondary);
+.logo-img {
+  height: 28px;
+  width: auto;
+  display: block;
 }
 .nav {
   display: flex;

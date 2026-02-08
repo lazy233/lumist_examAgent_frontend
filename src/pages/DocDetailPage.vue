@@ -3,8 +3,8 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
-import type { DocDetail, DocStatus } from '../services/docs'
-import { getDocsList, startParse } from '../services/docs'
+import type { DocDetail } from '../services/docs'
+import { getDocFile, getDocsList } from '../services/docs'
 import type { Difficulty, QuestionType } from '../services/exercises'
 import { generateExercise, getExerciseDetail } from '../services/exercises'
 
@@ -14,90 +14,10 @@ const docId = computed(() => route.params.docId as string)
 
 const loading = ref(true)
 const initError = ref(false)
-const status = ref<DocStatus>('uploaded')
 const fileName = ref('')
-const errorMessage = ref('')
-
-const parsed = reactive({
-  school: '',
-  major: '',
-  course: '',
-  summary: '',
-})
-
-const knowledgePoints = ref<string[]>([])
-
-let pollTimer: number | null = null
-
-const isParsing = computed(() => status.value === 'parsing' || status.value === 'uploaded')
-const isDone = computed(() => status.value === 'done')
-const isFailed = computed(() => status.value === 'failed')
-
-const applyDetail = (detail: DocDetail) => {
-  fileName.value = detail.fileName
-  status.value = detail.status
-  parsed.school = detail.parsed?.school || ''
-  parsed.major = detail.parsed?.major || ''
-  parsed.course = detail.parsed?.course || ''
-  parsed.summary = detail.parsed?.summary || ''
-  knowledgePoints.value = detail.parsed?.knowledgePoints || []
-}
-
-const stopPolling = () => {
-  if (pollTimer) {
-    window.clearInterval(pollTimer)
-    pollTimer = null
-  }
-}
-
-const fetchDocById = async () => {
-  const pageSize = 20
-  let currentPage = 1
-  let totalPages = 1
-
-  while (currentPage <= totalPages) {
-    const res = await getDocsList({ page: currentPage, pageSize })
-    const found = res.items?.find((item) => item.docId === docId.value)
-    if (found) {
-      return found
-    }
-    if (currentPage === 1) {
-      totalPages = Math.ceil((res.total || 0) / pageSize)
-      if (!totalPages) {
-        return null
-      }
-    }
-    currentPage += 1
-  }
-
-  return null
-}
-
-const startPolling = () => {
-  if (pollTimer) return
-  pollTimer = window.setInterval(async () => {
-    try {
-      const detail = await fetchDocById()
-      if (!detail) {
-        return
-      }
-      applyDetail(detail)
-      if (detail.status === 'done' || detail.status === 'failed') {
-        stopPolling()
-      }
-    } catch {
-      // keep polling
-    }
-  }, 1000)
-}
-
-const handleRetryParse = async () => {
-  errorMessage.value = ''
-  await startParse(docId.value)
-  status.value = 'parsing'
-  startPolling()
-}
-
+const fileContent = ref<'pdf' | 'text' | 'unsupported' | null>(null)
+const pdfObjectUrl = ref('')
+const textContent = ref('')
 const generateDialogVisible = ref(false)
 const generateForm = reactive({
   types: ['single_choice'] as QuestionType[],
@@ -123,6 +43,44 @@ const stopExercisePoll = () => {
   if (exercisePollTimer) {
     window.clearInterval(exercisePollTimer)
     exercisePollTimer = null
+  }
+}
+
+const fetchDocById = async () => {
+  const pageSize = 20
+  let currentPage = 1
+  let totalPages = 1
+  while (currentPage <= totalPages) {
+    const res = await getDocsList({ page: currentPage, pageSize })
+    const found = res.items?.find((item) => item.docId === docId.value)
+    if (found) return found
+    if (currentPage === 1) {
+      totalPages = Math.ceil((res.total || 0) / pageSize)
+      if (!totalPages) return null
+    }
+    currentPage += 1
+  }
+  return null
+}
+
+const getFileExt = (name: string) =>
+  name.split('.').pop()?.toLowerCase() || ''
+
+const loadFileContent = async (detail: DocDetail) => {
+  try {
+    const blob = await getDocFile(docId.value)
+    const ext = getFileExt(detail.fileName)
+    if (ext === 'pdf') {
+      pdfObjectUrl.value = URL.createObjectURL(blob)
+      fileContent.value = 'pdf'
+    } else if (ext === 'txt') {
+      textContent.value = await blob.text()
+      fileContent.value = 'text'
+    } else {
+      fileContent.value = 'unsupported'
+    }
+  } catch {
+    fileContent.value = 'unsupported'
   }
 }
 
@@ -191,20 +149,17 @@ const handleGenerateCancel = () => {
 const initDetail = async () => {
   loading.value = true
   initError.value = false
+  pdfObjectUrl.value = ''
+  textContent.value = ''
+  fileContent.value = null
   try {
     const detail = await fetchDocById()
     if (!detail) {
       initError.value = true
       return
     }
-    applyDetail(detail)
-    if (detail.status === 'uploaded') {
-      await startParse(docId.value)
-      status.value = 'parsing'
-    }
-    if (status.value === 'parsing' || detail.status === 'parsing') {
-      startPolling()
-    }
+    fileName.value = detail.fileName
+    await loadFileContent(detail)
   } catch {
     initError.value = true
   } finally {
@@ -217,8 +172,10 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  stopPolling()
   stopExercisePoll()
+  if (pdfObjectUrl.value) {
+    URL.revokeObjectURL(pdfObjectUrl.value)
+  }
 })
 </script>
 
@@ -240,70 +197,35 @@ onBeforeUnmount(() => {
             <div class="subtitle">{{ fileName || '未命名资料' }}</div>
           </div>
           <div class="actions">
-            <el-tag v-if="isParsing" type="warning">解析中</el-tag>
-            <el-tag v-else-if="isDone" type="success">解析完成</el-tag>
-            <el-tag v-else-if="isFailed" type="danger">解析失败</el-tag>
-            <el-tag v-else type="info">已上传</el-tag>
+            <el-button type="primary" @click="handleGenerateExercise">
+              生成练习题
+            </el-button>
           </div>
         </div>
       </template>
 
       <el-skeleton :loading="loading" animated>
         <template #default>
-          <div class="section">
-            <div class="section-title">学校</div>
-            <div v-if="parsed.school">{{ parsed.school }}</div>
-            <el-skeleton-item v-else-if="isParsing" variant="text" />
-            <div v-else class="placeholder">暂无</div>
-          </div>
-
-          <div class="section">
-            <div class="section-title">专业</div>
-            <div v-if="parsed.major">{{ parsed.major }}</div>
-            <el-skeleton-item v-else-if="isParsing" variant="text" />
-            <div v-else class="placeholder">暂无</div>
-          </div>
-
-          <div class="section">
-            <div class="section-title">课程</div>
-            <div v-if="parsed.course">{{ parsed.course }}</div>
-            <el-skeleton-item v-else-if="isParsing" variant="text" />
-            <div v-else class="placeholder">暂无</div>
-          </div>
-
-          <div class="section">
-            <div class="section-title">核心知识点</div>
-            <div v-if="knowledgePoints.length" class="chips">
-              <el-tag v-for="(item, index) in knowledgePoints" :key="index">
-                {{ item }}
-              </el-tag>
-            </div>
-            <el-skeleton-item v-else-if="isParsing" variant="text" />
-            <div v-else class="placeholder">暂无</div>
-          </div>
-
-          <div class="section">
-            <div class="section-title">内容摘要</div>
-            <div v-if="parsed.summary" class="summary">{{ parsed.summary }}</div>
-            <el-skeleton-item v-else-if="isParsing" variant="text" />
-            <div v-else class="placeholder">暂无</div>
-          </div>
-
-          <div v-if="isFailed" class="error-area">
-            <el-alert
-              :title="errorMessage || '解析失败，请重试'"
-              type="error"
-              show-icon
+          <div v-if="fileContent === 'pdf'" class="file-preview pdf-preview">
+            <iframe
+              :src="pdfObjectUrl"
+              class="pdf-iframe"
+              title="PDF 预览"
             />
-            <el-button type="primary" class="mt-12" @click="handleRetryParse">
-              重新解析
-            </el-button>
           </div>
-
-          <div class="footer-actions">
-            <el-button type="primary" :disabled="!isDone" @click="handleGenerateExercise">
+          <div v-else-if="fileContent === 'text'" class="file-preview text-preview">
+            <pre class="text-content">{{ textContent }}</pre>
+          </div>
+          <div v-else-if="fileContent === 'unsupported'" class="file-preview unsupported">
+            <p class="unsupported-hint">
+              此格式暂不支持在线预览，请使用下方「生成练习题」功能。
+            </p>
+            <el-button type="primary" @click="handleGenerateExercise">
               生成练习题
             </el-button>
+          </div>
+          <div v-else-if="!loading && !fileContent" class="file-preview unsupported">
+            <p class="unsupported-hint">暂无内容可预览</p>
           </div>
         </template>
       </el-skeleton>
@@ -392,41 +314,55 @@ onBeforeUnmount(() => {
 }
 
 .actions {
-  display: inline-flex;
+  display: flex;
   align-items: center;
   gap: 12px;
 }
 
-.section {
-  margin-bottom: 18px;
+.file-preview {
+  min-height: 400px;
+  border-radius: 8px;
+  border: 1px solid #ebeef5;
+  overflow: hidden;
 }
 
-.section-title {
-  font-weight: 600;
-  margin-bottom: 8px;
+.pdf-preview {
+  height: 70vh;
 }
 
-.chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+.pdf-iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
 }
 
-.summary {
+.text-preview {
+  padding: 16px;
+  background: #fafbfc;
+}
+
+.text-content {
+  margin: 0;
   white-space: pre-wrap;
-  line-height: 1.8;
+  font-size: 14px;
+  line-height: 1.7;
+  color: #303133;
 }
 
-.placeholder {
-  color: #9aa4b2;
+.unsupported {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 48px;
+  background: #fafbfc;
 }
 
-.error-area {
-  margin-top: 16px;
-}
-
-.mt-12 {
-  margin-top: 12px;
+.unsupported-hint {
+  margin: 0;
+  color: #606266;
+  font-size: 14px;
 }
 
 .generate-loading {
@@ -444,12 +380,6 @@ onBeforeUnmount(() => {
 @keyframes spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
-}
-
-.footer-actions {
-  margin-top: 24px;
-  display: flex;
-  justify-content: flex-end;
 }
 
 .init-error {

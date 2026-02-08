@@ -1,17 +1,15 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import type { UploadRequestOptions } from 'element-plus'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { Loading, UploadFilled } from '@element-plus/icons-vue'
-import { startParse, uploadDoc } from '../services/docs'
-import { getDocsList } from '../services/docs'
+import { getDocFile, getDocsList } from '../services/docs'
 import type { DocListItem } from '../services/docs'
 import { dashboardPresets } from '../config/dashboardPresets'
-import { analyzeForConfirm, generateExerciseStreamFromText } from '../services/exercises'
+import type { UsageInfo } from '../services/exercises'
+import { analyzeFile, analyzeForConfirm, generateExerciseStreamFromText } from '../services/exercises'
 
 const router = useRouter()
-const uploading = ref(false)
 const fileInputRef = ref<HTMLInputElement | null>(null)
 
 // 文档出题方式：资料库出题 | 上传文件
@@ -19,7 +17,11 @@ const uploadMode = ref<'doc_lib' | 'upload'>('upload')
 const docList = ref<DocListItem[]>([])
 const docListLoading = ref(false)
 const selectedDocId = ref('')
-const saveToLibrary = ref(false)
+
+/** 上传模式：用户选择的文件（不跳转，仅在本页出题） */
+const selectedFile = ref<File | null>(null)
+/** 当前显示的文件标题（上传文件名 或 资料库选中的文档名） */
+const displayedFileTitle = ref('')
 
 const loadDocList = async () => {
   if (uploadMode.value !== 'doc_lib') return
@@ -27,9 +29,12 @@ const loadDocList = async () => {
   try {
     const res = await getDocsList({ pageSize: 100 })
     docList.value = res.items ?? []
-    if (docList.value.length && !selectedDocId.value) {
-      selectedDocId.value = docList.value[0].docId
+    const first = docList.value[0]
+    if (first && !selectedDocId.value) {
+      selectedDocId.value = first.docId
     }
+    const doc = docList.value.find((d) => d.docId === selectedDocId.value)
+    if (doc) displayedFileTitle.value = doc.fileName || doc.docId
   } catch {
     docList.value = []
   } finally {
@@ -37,10 +42,10 @@ const loadDocList = async () => {
   }
 }
 
-const goToDocAndGenerate = () => {
-  if (!selectedDocId.value) return
-  router.push(`/docs/${selectedDocId.value}`)
-}
+/** 文件分析结果（用于确认） */
+const fileAnalyzeResult = ref<{ content: string; title: string } | null>(null)
+/** 文件流下用户可编辑的标题 */
+const fileTitleEdit = ref('')
 
 // 核心输入区
 const inputText = ref('')
@@ -67,9 +72,6 @@ const selectedDifficulty = ref('medium')
 const count = ref(5)
 const minCount = 1
 const maxCount = 50
-const decrementCount = () => {
-  if (count.value > minCount) count.value--
-}
 const incrementCount = () => {
   if (count.value < maxCount) count.value++
 }
@@ -78,39 +80,191 @@ defineExpose({ incrementCount })
 // 动态交互面板
 type PanelMode = 'message' | 'wait_confirm' | 'preview'
 const panelMode = ref<PanelMode>('message')
-const panelMessage = ref('输入文字材料后点击「AI 出题」，或使用下方一键生成预设；也可用右上角上传文档。')
-const keyPoints = ref<string[]>([])
+const panelMessage = ref('输入文字材料后点击「AI 出题」，也可用右上角上传文档。')
+/** 是否为文件出题流程（文件分析结果的确认） */
+const isFileFlow = ref(false)
+const confirmData = ref<{
+  keyPoints: string[]
+  questionType: string
+  questionTypeLabel: string
+  difficulty: string
+  difficultyLabel: string
+  count: number
+} | null>(null)
+const editableConfirmContent = ref('')
+const isEditingConfirm = ref(false)
 const previewContent = ref('')
 const confirmLoading = ref(false)
 const streaming = ref(false)
 const generatedExerciseId = ref('')
-const MAX_DISPLAY_CHARS = 800
+/** 分析接口返回的 token 消耗 */
+const usageAnalyze = ref<UsageInfo | null>(null)
+/** 流式生成结束返回的 token 消耗 */
+const usageGenerate = ref<UsageInfo | null>(null)
 
-const displayContent = computed(() => {
-  const s = previewContent.value
-  if (!streaming.value || s.length <= MAX_DISPLAY_CHARS) return s
-  return s.slice(0, MAX_DISPLAY_CHARS) + '…'
-})
+/** 从流式文本中解析题目：支持 1. 题干 / A. 选项 等格式，实时解析 */
+interface ParsedQuestion {
+  index: number
+  stem: string
+  options?: Record<string, string>
+}
 
-/** useAnalyzeApi: true = 调用后端分析接口；false = 预设生成，直接本地确认 */
-const handleAiGenerate = async (useAnalyzeApi = true) => {
+const parseQuestionsFromStream = (text: string): { questions: ParsedQuestion[]; partial?: string } => {
+  if (!text.trim()) return { questions: [] }
+  let s = text.trim()
+  // 移除末尾可能的 JSON 行（exerciseId）
+  const lines = s.split(/\r?\n/)
+  const lastLine = lines[lines.length - 1]?.trim()
+  if (lastLine && (lastLine.startsWith('{') || lastLine.startsWith('['))) {
+    try {
+      JSON.parse(lastLine)
+      lines.pop()
+      s = lines.join('\n').trim()
+    } catch {
+      // 不是有效 JSON，忽略
+    }
+  }
+  // 按题目边界分割：1. / 1、/ ## 1 / 【1】/ 题目1
+  const parts = s.split(/(?=\n(?:\d+[\.、．]\s|##\s*\d+[\.、．]?\s|【\d+】\s|题目\d+[：:]\s))/)
+  const questions: ParsedQuestion[] = []
+  let lastPartial = ''
+  for (let i = 0; i < parts.length; i++) {
+    const block = (parts[i] ?? '').trim()
+    if (!block) continue
+    const blockLines = block.split(/\r?\n/).filter((l) => l.trim())
+    if (blockLines.length === 0) continue
+    const firstLine = blockLines[0] ?? ''
+    const stem = firstLine.replace(/^(?:\d+[\.、．]\s?|##\s*\d+[\.、．]?\s?|【\d+】\s?|题目\d+[：:]\s?)/, '').trim()
+    const options: Record<string, string> = {}
+    for (let j = 1; j < blockLines.length; j++) {
+      const line = blockLines[j] ?? ''
+      const optMatch = line.match(/^([A-D])[\.、．]\s*(.+)$/)
+      if (optMatch && optMatch[1] && optMatch[2]) {
+        options[optMatch[1]] = optMatch[2].trim()
+      }
+    }
+    if (stem || Object.keys(options).length > 0) {
+      questions.push({
+        index: questions.length + 1,
+        stem: stem || '(题干解析中…)',
+        options: Object.keys(options).length ? options : undefined,
+      })
+      lastPartial = ''
+    } else {
+      lastPartial = block
+    }
+  }
+  return { questions, partial: lastPartial || undefined }
+}
+
+const parsedPreview = computed(() => parseQuestionsFromStream(previewContent.value))
+
+/** 获取用于生成的 content：文本流用输入/编辑内容，文件流用分析结果 */
+const getContentForGenerate = () => {
+  if (isFileFlow.value && fileAnalyzeResult.value) {
+    return fileAnalyzeResult.value.content
+  }
+  if (isEditingConfirm.value && editableConfirmContent.value.trim()) {
+    return editableConfirmContent.value.trim()
+  }
+  return inputText.value.trim()
+}
+
+/** 获取用于生成的参数（优先使用后端返回的确认数据） */
+const getParamsForGenerate = () => {
+  const d = confirmData.value
+  const title = isFileFlow.value ? (fileTitleEdit.value.trim() || fileAnalyzeResult.value?.title || null) : null
+  return {
+    content: getContentForGenerate(),
+    title,
+    questionType: d?.questionType ?? selectedType.value,
+    difficulty: d?.difficulty ?? selectedDifficulty.value,
+    count: d?.count ?? count.value,
+  }
+}
+
+/** 执行文件分析并进入确认 */
+const runFileAnalyze = async (file: File) => {
+  panelMode.value = 'wait_confirm'
+  confirmData.value = null
+  fileAnalyzeResult.value = null
+  usageAnalyze.value = null
+  isFileFlow.value = true
+  isEditingConfirm.value = false
+  confirmLoading.value = true
+  try {
+    const res = await analyzeFile(file)
+    fileAnalyzeResult.value = { content: res.content, title: res.title }
+    fileTitleEdit.value = res.title
+    usageAnalyze.value = res.usage ?? null
+    const typeLabel = questionTypeOptions.find((o) => o.value === selectedType.value)?.label ?? '单选题'
+    const diffLabel = difficultyOptions.find((o) => o.value === selectedDifficulty.value)?.label ?? '中等'
+    confirmData.value = {
+      keyPoints: ['材料内容见下方'],
+      questionType: selectedType.value,
+      questionTypeLabel: typeLabel,
+      difficulty: selectedDifficulty.value,
+      difficultyLabel: diffLabel,
+      count: count.value,
+    }
+  } catch {
+    panelMessage.value = '文件分析失败，请稍后重试。'
+    panelMode.value = 'message'
+    isFileFlow.value = false
+  } finally {
+    confirmLoading.value = false
+  }
+}
+
+/** 资料库出题：获取文件后分析 */
+const handleFileFromDocLib = async () => {
+  const docId = selectedDocId.value
+  if (!docId) return
+  const doc = docList.value.find((d) => d.docId === docId)
+  const fileName = doc?.fileName || docId
+  displayedFileTitle.value = fileName
+  try {
+    const blob = await getDocFile(docId)
+    const file = new File([blob], fileName, { type: blob.type || 'application/octet-stream' })
+    await runFileAnalyze(file)
+  } catch {
+    panelMessage.value = '获取文件失败，请稍后重试。'
+    panelMode.value = 'message'
+  }
+}
+
+/** 文本出题：调用分析接口 */
+const handleTextAnalyze = async (useAnalyzeApi = true) => {
   const text = inputText.value.trim()
   if (!text) {
     panelMode.value = 'message'
-    panelMessage.value = '请先输入文字材料或指令。'
+    panelMessage.value = '请输入文字材料，或选择/上传文件后点击出题。'
     return
   }
   panelMode.value = 'wait_confirm'
-  keyPoints.value = []
+  confirmData.value = null
+  fileAnalyzeResult.value = null
+  usageAnalyze.value = null
+  isFileFlow.value = false
+  isEditingConfirm.value = false
 
   if (!useAnalyzeApi) {
-    // 预设生成：不请求分析接口，直接展示本地确认信息
-    keyPoints.value = [
-      '材料主题：' + (text.slice(0, 30) + (text.length > 30 ? '…' : '')),
-      '题型：' + (questionTypeOptions.find((o) => o.value === selectedType.value)?.label ?? ''),
-      '难度：' + (difficultyOptions.find((o) => o.value === selectedDifficulty.value)?.label ?? '中等'),
-      '数量：' + count.value + ' 道',
-    ]
+    const typeLabel = questionTypeOptions.find((o) => o.value === selectedType.value)?.label ?? '单选题'
+    const diffLabel = difficultyOptions.find((o) => o.value === selectedDifficulty.value)?.label ?? '中等'
+    confirmData.value = {
+      keyPoints: [
+        '材料主题：' + (text.slice(0, 30) + (text.length > 30 ? '…' : '')),
+        '题型：' + typeLabel,
+        '难度：' + diffLabel,
+        '数量：' + count.value + ' 道',
+      ],
+      questionType: selectedType.value,
+      questionTypeLabel: typeLabel,
+      difficulty: selectedDifficulty.value,
+      difficultyLabel: diffLabel,
+      count: count.value,
+    }
+    editableConfirmContent.value = confirmData.value.keyPoints.join('\n')
     return
   }
 
@@ -122,12 +276,23 @@ const handleAiGenerate = async (useAnalyzeApi = true) => {
       difficulty: selectedDifficulty.value,
       count: count.value,
     })
-    keyPoints.value = res.keyPoints?.length ? res.keyPoints : [
-      '材料主题：' + (text.slice(0, 30) + (text.length > 30 ? '…' : '')),
-      '题型：' + (questionTypeOptions.find((o) => o.value === selectedType.value)?.label ?? ''),
-      '难度：' + (difficultyOptions.find((o) => o.value === selectedDifficulty.value)?.label ?? '中等'),
-      '数量：' + count.value + ' 道',
-    ]
+    const typeLabel = res.questionTypeLabel ?? questionTypeOptions.find((o) => o.value === (res.questionType ?? selectedType.value))?.label ?? '单选题'
+    const diffLabel = res.difficultyLabel ?? difficultyOptions.find((o) => o.value === (res.difficulty ?? selectedDifficulty.value))?.label ?? '中等'
+    confirmData.value = {
+      keyPoints: res.keyPoints?.length ? res.keyPoints : [
+        '材料主题：' + (text.slice(0, 30) + (text.length > 30 ? '…' : '')),
+        '题型：' + typeLabel,
+        '难度：' + diffLabel,
+        '数量：' + (res.count ?? count.value) + ' 道',
+      ],
+      questionType: res.questionType ?? selectedType.value,
+      questionTypeLabel: typeLabel,
+      difficulty: res.difficulty ?? selectedDifficulty.value,
+      difficultyLabel: diffLabel,
+      count: res.count ?? count.value,
+    }
+    editableConfirmContent.value = confirmData.value.keyPoints.join('\n')
+    usageAnalyze.value = res.usage ?? null
   } catch {
     panelMessage.value = '获取确认信息失败，请稍后重试。'
     panelMode.value = 'message'
@@ -136,39 +301,52 @@ const handleAiGenerate = async (useAnalyzeApi = true) => {
   }
 }
 
+/** 统一出题入口：根据是否有文件走不同逻辑 */
+const handleAiGenerate = async (useAnalyzeApi = true) => {
+  const hasFile = (uploadMode.value === 'upload' && selectedFile.value) || (uploadMode.value === 'doc_lib' && selectedDocId.value)
+  if (hasFile) {
+    if (uploadMode.value === 'upload') {
+      await runFileAnalyze(selectedFile.value!)
+    } else {
+      await handleFileFromDocLib()
+    }
+    return
+  }
+  await handleTextAnalyze(useAnalyzeApi)
+}
+
 const handleConfirm = () => {
   panelMode.value = 'preview'
   previewContent.value = ''
   generatedExerciseId.value = ''
+  usageGenerate.value = null
   streaming.value = true
-  generateExerciseStreamFromText(
-    {
-      content: inputText.value.trim(),
-      questionType: selectedType.value,
-      difficulty: selectedDifficulty.value,
-      count: count.value,
+  const params = getParamsForGenerate()
+  generateExerciseStreamFromText(params, {
+    onChunk: (text) => {
+      previewContent.value += text
     },
-    {
-      onChunk: (text) => {
-        previewContent.value += text
-      },
-      onDone: (exerciseId) => {
-        streaming.value = false
-        generatedExerciseId.value = exerciseId || ''
-      },
-      onError: (err) => {
-        streaming.value = false
-        panelMessage.value = '题目生成失败，请重试。'
-        panelMode.value = 'message'
-        ElMessage.error(err?.message || '题目生成失败，请重试。')
-      },
-    }
-  )
+    onDone: (exerciseId, usage) => {
+      streaming.value = false
+      generatedExerciseId.value = exerciseId || ''
+      usageGenerate.value = usage ?? null
+    },
+    onError: (err) => {
+      streaming.value = false
+      panelMessage.value = '题目生成失败，请重试。'
+      panelMode.value = 'message'
+      ElMessage.error(err?.message || '题目生成失败，请重试。')
+    },
+  })
 }
 
 const handleEdit = () => {
-  panelMode.value = 'message'
-  panelMessage.value = '请修改上方输入后重新点击「AI出题」。'
+  if (isEditingConfirm.value) {
+    isEditingConfirm.value = false
+    return
+  }
+  isEditingConfirm.value = true
+  editableConfirmContent.value = confirmData.value?.keyPoints?.join('\n') ?? editableConfirmContent.value
 }
 
 const handleGoToDetail = () => {
@@ -189,7 +367,7 @@ const applyPreset = (preset: (typeof dashboardPresets)[number]) => {
 }
 
 // 上传：校验
-const beforeUpload = (file: File) => {
+const beforeFileSelect = (file: File) => {
   const ext = file.name.split('.').pop()?.toLowerCase()
   const allow = ['pdf', 'docx', 'pptx', 'txt']
   if (!ext || !allow.includes(ext)) {
@@ -199,49 +377,32 @@ const beforeUpload = (file: File) => {
   return true
 }
 
-const handleUpload = async (options: UploadRequestOptions) => {
-  try {
-    uploading.value = true
-    const data = await uploadDoc(options.file as File, { saveToLibrary: saveToLibrary.value })
-    await startParse(data.docId)
-    ElMessage.success(saveToLibrary.value ? '已保存到资料库，正在解析' : '上传成功，正在解析')
-    options.onSuccess?.(data)
-    router.push(`/docs/${data.docId}`)
-  } catch (err) {
-    ElMessage.error('上传失败，请重试')
-    options.onError?.(err as never)
-  } finally {
-    uploading.value = false
-  }
-}
-
-// 按钮触发的上传（隐藏 input）
-const onFileSelected = async (e: Event) => {
+// 选择文件：仅存储并显示标题，不跳转
+const onFileSelected = (e: Event) => {
   const target = e.target as HTMLInputElement
   const file = target.files?.[0]
   if (!file) return
-  if (!beforeUpload(file)) {
+  if (!beforeFileSelect(file)) {
     target.value = ''
     return
   }
-  try {
-    uploading.value = true
-    const data = await uploadDoc(file, { saveToLibrary: saveToLibrary.value })
-    await startParse(data.docId)
-    ElMessage.success(saveToLibrary.value ? '已保存到资料库，正在解析' : '上传成功，正在解析')
-    router.push(`/docs/${data.docId}`)
-  } catch (err) {
-    ElMessage.error('上传失败，请重试')
-  } finally {
-    uploading.value = false
-    target.value = ''
-  }
+  selectedFile.value = file
+  displayedFileTitle.value = file.name
+  target.value = ''
 }
 
 const triggerUpload = () => fileInputRef.value?.click()
 
 watch(uploadMode, (mode) => {
+  selectedFile.value = null
+  displayedFileTitle.value = ''
   if (mode === 'doc_lib') loadDocList()
+})
+watch(selectedDocId, (id) => {
+  if (uploadMode.value === 'doc_lib' && id) {
+    const doc = docList.value.find((d) => d.docId === id)
+    displayedFileTitle.value = doc?.fileName || id
+  }
 })
 onMounted(() => {
   if (uploadMode.value === 'doc_lib') loadDocList()
@@ -283,8 +444,9 @@ onMounted(() => {
           <el-button
             type="primary"
             size="default"
+            :loading="confirmLoading"
             :disabled="!selectedDocId"
-            @click="goToDocAndGenerate"
+            @click="handleFileFromDocLib"
           >
             用此资料出题
           </el-button>
@@ -299,7 +461,6 @@ onMounted(() => {
             @change="onFileSelected"
           />
           <el-button
-            :loading="uploading"
             size="default"
             class="upload-btn"
             @click="triggerUpload"
@@ -307,11 +468,9 @@ onMounted(() => {
             <el-icon><UploadFilled /></el-icon>
             选择文件出题
           </el-button>
-          <el-checkbox v-model="saveToLibrary" class="save-checkbox">
-            保存本次文档到资料库
-          </el-checkbox>
         </template>
         <span class="upload-hint">支持 pdf / docx / pptx / txt</span>
+        <span v-if="displayedFileTitle" class="file-title-display">当前：{{ displayedFileTitle }}</span>
       </div>
     </div>
 
@@ -329,8 +488,8 @@ onMounted(() => {
         />
       </div>
 
-      <!-- 一键生成预设 -->
-      <div class="preset-row">
+      <!-- 一键生成预设（暂时隐藏） -->
+      <div v-if="false" class="preset-row">
         <span class="preset-label">一键生成</span>
         <div class="preset-btns">
           <el-button
@@ -388,31 +547,126 @@ onMounted(() => {
         </el-button>
       </div>
 
-      <!-- 动态面板：填充剩余空间 -->
+      <!-- 动态面板：固定高度 -->
       <div class="panel-wrap">
         <div class="dynamic-panel" :class="panelMode">
           <div v-if="panelMode === 'message'" class="panel-message">
             <p class="panel-text">{{ panelMessage }}</p>
           </div>
           <div v-else-if="panelMode === 'wait_confirm'" class="panel-wait-confirm">
-            <ul v-if="!confirmLoading" class="key-points">
-              <li v-for="(point, i) in keyPoints" :key="i">{{ point }}</li>
-            </ul>
-            <div v-else class="panel-loading-hint">
-              <el-icon class="is-loading"><Loading /></el-icon>
-              <span>正在分析材料，请稍候…</span>
-            </div>
+            <template v-if="confirmLoading">
+              <div class="panel-loading-hint">
+                <el-icon class="is-loading"><Loading /></el-icon>
+                <span>正在分析材料，请稍候…</span>
+              </div>
+            </template>
+            <template v-else-if="isEditingConfirm">
+              <div class="panel-edit-area">
+                <div class="panel-edit-label">可修改下方内容后点击「确认」生成：</div>
+                <el-input
+                  v-model="editableConfirmContent"
+                  type="textarea"
+                  :rows="12"
+                  placeholder="编辑确认内容…"
+                  class="panel-edit-input"
+                />
+              </div>
+            </template>
+            <template v-else-if="confirmData || fileAnalyzeResult">
+              <div class="confirm-info">
+                <!-- 文件流：显示可编辑标题与材料内容 -->
+                <template v-if="isFileFlow && fileAnalyzeResult">
+                  <div class="confirm-row">
+                    <span class="confirm-label">试卷标题</span>
+                    <el-input v-model="fileTitleEdit" placeholder="建议标题" size="default" class="title-edit-input" />
+                  </div>
+                  <div class="confirm-section">
+                    <span class="confirm-label">材料内容</span>
+                    <div class="content-preview">{{ fileAnalyzeResult.content }}</div>
+                  </div>
+                </template>
+                <!-- 文本流：显示要点 -->
+                <template v-else-if="confirmData">
+                  <div class="confirm-row">
+                    <span class="confirm-label">题型</span>
+                    <span class="confirm-value">{{ confirmData.questionTypeLabel }}</span>
+                  </div>
+                  <div class="confirm-row">
+                    <span class="confirm-label">难度</span>
+                    <span class="confirm-value">{{ confirmData.difficultyLabel }}</span>
+                  </div>
+                  <div class="confirm-row">
+                    <span class="confirm-label">数量</span>
+                    <span class="confirm-value">{{ confirmData.count }} 道</span>
+                  </div>
+                  <div class="confirm-section">
+                    <span class="confirm-label">要点</span>
+                    <ul class="confirm-key-points">
+                      <li v-for="(point, i) in confirmData.keyPoints" :key="i">{{ point }}</li>
+                    </ul>
+                  </div>
+                </template>
+                <!-- 文件流时也显示题型/难度/数量 -->
+                <template v-if="isFileFlow && confirmData">
+                  <div class="confirm-row">
+                    <span class="confirm-label">题型</span>
+                    <span class="confirm-value">{{ confirmData.questionTypeLabel }}</span>
+                  </div>
+                  <div class="confirm-row">
+                    <span class="confirm-label">难度</span>
+                    <span class="confirm-value">{{ confirmData.difficultyLabel }}</span>
+                  </div>
+                  <div class="confirm-row">
+                    <span class="confirm-label">数量</span>
+                    <span class="confirm-value">{{ confirmData.count }} 道</span>
+                  </div>
+                </template>
+                <div v-if="usageAnalyze" class="usage-row">
+                  <span class="usage-label">本次分析 Token 消耗</span>
+                  <span class="usage-value">输入 {{ usageAnalyze.inputTokens }} · 输出 {{ usageAnalyze.outputTokens }} · 共计 {{ usageAnalyze.totalTokens }}</span>
+                </div>
+              </div>
+            </template>
             <div class="panel-actions">
-              <el-button type="primary" :loading="confirmLoading" :disabled="confirmLoading" @click="handleConfirm">✅ 确认</el-button>
-              <el-button :disabled="confirmLoading" @click="handleEdit">✏️ 修改</el-button>
+              <el-button type="primary" :loading="confirmLoading" :disabled="confirmLoading" @click="handleConfirm">确认</el-button>
+              <el-button v-if="!isFileFlow" :disabled="confirmLoading" @click="handleEdit">{{ isEditingConfirm ? '取消' : '修改' }}</el-button>
             </div>
           </div>
           <div v-else-if="panelMode === 'preview'" class="panel-preview">
             <div v-if="streaming" class="panel-streaming-hint">
               <el-icon class="is-loading"><Loading /></el-icon>
-              <span>正在生成题目… 已显示前 {{ Math.min(previewContent.length, MAX_DISPLAY_CHARS) }} 字</span>
+              <span>正在生成题目… 已解析 {{ parsedPreview.questions.length }} 题</span>
             </div>
-            <pre class="preview-content">{{ displayContent }}</pre>
+            <div class="preview-questions">
+              <div
+                v-for="q in parsedPreview.questions"
+                :key="q.index"
+                class="question-card"
+              >
+                <div class="question-stem">{{ q.index }}. {{ q.stem }}</div>
+                <div v-if="q.options && Object.keys(q.options).length" class="question-options">
+                  <div
+                    v-for="(val, key) in q.options"
+                    :key="key"
+                    class="option-row"
+                  >
+                    {{ key }}. {{ val }}
+                  </div>
+                </div>
+              </div>
+              <div v-if="streaming && parsedPreview.partial" class="question-card partial">
+                <div class="question-stem">解析中…</div>
+                <pre class="partial-raw">{{ parsedPreview.partial }}</pre>
+              </div>
+              <div v-else-if="streaming && previewContent && !parsedPreview.questions.length" class="question-card partial">
+                <div class="question-stem">解析中…</div>
+                <pre class="partial-raw">{{ previewContent.slice(0, 300) }}{{ previewContent.length > 300 ? '…' : '' }}</pre>
+              </div>
+            </div>
+            <div v-if="!streaming && usageGenerate" class="usage-row">
+              <span class="usage-label">本次生成 Token 消耗</span>
+              <span class="usage-value">输入 {{ usageGenerate.inputTokens }} · 输出 {{ usageGenerate.outputTokens }} · 共计 {{ usageGenerate.totalTokens }}</span>
+            </div>
             <el-button type="primary" class="full-btn" :disabled="streaming" @click="handleGoToDetail">
               {{ streaming ? '生成中，请稍候…' : '查看全部题目' }}
             </el-button>
@@ -576,26 +830,26 @@ onMounted(() => {
 }
 
 .panel-wrap {
-  flex: 1;
-  min-height: 300px;
+  flex-shrink: 0;
+  height: 360px;
   display: flex;
   flex-direction: column;
 }
 .dynamic-panel {
-  flex: 1;
+  height: 100%;
   border-radius: 8px;
   background: #fafbfc;
   border: 1px dashed #e4e7ed;
   padding: 20px 24px;
-  min-height: 280px;
   display: flex;
   flex-direction: column;
-  overflow: auto;
+  overflow: hidden;
 }
 .dynamic-panel.message .panel-message {
   flex: 1;
   display: flex;
   align-items: center;
+  overflow-y: auto;
 }
 .dynamic-panel.message .panel-text {
   margin: 0;
@@ -604,18 +858,102 @@ onMounted(() => {
   line-height: 1.7;
 }
 .panel-wait-confirm {
+  flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
+  min-height: 0;
+  overflow: hidden;
 }
-.panel-wait-confirm .key-points {
+.confirm-info {
+  flex: 1;
+  overflow-y: auto;
+  padding-right: 8px;
+}
+.confirm-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+  font-size: 14px;
+}
+.confirm-label {
+  flex-shrink: 0;
+  width: 56px;
+  color: #606266;
+  font-weight: 500;
+}
+.confirm-value {
+  color: #303133;
+}
+.confirm-section {
+  margin-top: 12px;
+}
+.confirm-section .confirm-label {
+  display: block;
+  margin-bottom: 8px;
+}
+.confirm-key-points {
   margin: 0;
   padding-left: 20px;
   color: #303133;
   line-height: 1.9;
   font-size: 14px;
 }
+.title-edit-input {
+  flex: 1;
+  max-width: 300px;
+}
+.content-preview {
+  max-height: 120px;
+  overflow-y: auto;
+  padding: 8px 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #606266;
+  white-space: pre-wrap;
+}
+.file-title-display {
+  font-size: 13px;
+  color: #606266;
+  margin-left: 8px;
+}
+.usage-row {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #ebeef5;
+  font-size: 13px;
+}
+.usage-label {
+  color: #909399;
+  margin-right: 8px;
+}
+.usage-value {
+  color: #606266;
+}
+.panel-edit-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow: hidden;
+}
+.panel-edit-label {
+  flex-shrink: 0;
+  font-size: 13px;
+  color: #606266;
+}
+.panel-edit-input {
+  flex: 1;
+  min-height: 0;
+}
+.panel-edit-input :deep(.el-textarea__inner) {
+  height: 100% !important;
+  min-height: 160px;
+}
 .panel-wait-confirm .panel-actions {
+  flex-shrink: 0;
   display: flex;
   gap: 12px;
 }
@@ -630,9 +968,12 @@ onMounted(() => {
   font-size: 18px;
 }
 .panel-preview {
+  flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
+  min-height: 0;
+  overflow: hidden;
 }
 .panel-streaming-hint {
   display: flex;
@@ -645,15 +986,50 @@ onMounted(() => {
 .panel-streaming-hint .el-icon {
   font-size: 16px;
 }
-.panel-preview .preview-content {
+.preview-questions {
   flex: 1;
-  white-space: pre-wrap;
-  font-size: 13px;
-  line-height: 1.7;
-  color: #303133;
-  margin: 0;
-  min-height: 120px;
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-right: 4px;
+}
+.question-card {
+  padding: 12px 14px;
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #ebeef5;
+  font-size: 14px;
+}
+.question-card.partial {
+  background: #fafbfc;
+  border-style: dashed;
+}
+.question-stem {
+  font-weight: 500;
+  color: #303133;
+  line-height: 1.6;
+  margin-bottom: 8px;
+}
+.question-options {
+  margin-top: 8px;
+  padding-left: 4px;
+}
+.option-row {
+  padding: 4px 0;
+  color: #606266;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.partial-raw {
+  margin: 0;
+  white-space: pre-wrap;
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.5;
+}
+.panel-preview .usage-row {
+  flex-shrink: 0;
 }
 .panel-preview .full-btn {
   width: 100%;

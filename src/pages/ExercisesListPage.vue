@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import type { Difficulty, ExerciseListItem } from '../services/exercises'
-import { getExercisesList } from '../services/exercises'
+import { deleteExercise, getExercisesList } from '../services/exercises'
 
 const router = useRouter()
 const loading = ref(false)
@@ -62,6 +63,29 @@ const handleView = (row: ExerciseListItem) => {
   router.push(`/exercises/${row.exerciseId}`)
 }
 
+const handleRetry = (row: ExerciseListItem) => {
+  router.push(`/exercises/${row.exerciseId}?retry=1`)
+}
+
+const handleDelete = async (row: ExerciseListItem) => {
+  await ElMessageBox.confirm(
+    `确定删除练习「${row.title || row.exerciseId}」吗？删除后无法恢复。`,
+    '确认删除',
+    {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+    }
+  )
+  try {
+    await deleteExercise(row.exerciseId)
+    ElMessage.success('删除成功')
+    fetchList()
+  } catch {
+    // error handled by http interceptor
+  }
+}
+
 const hasScore = (row: ExerciseListItem) => row.score != null
 
 const formatDate = (dateStr: string) => {
@@ -84,9 +108,6 @@ onMounted(() => {
       <template #header>
         <div class="card-header">
           <span>我的练习</span>
-          <el-button type="primary" @click="router.push('/dashboard')">
-            上传资料
-          </el-button>
         </div>
       </template>
 
@@ -139,7 +160,7 @@ onMounted(() => {
             :image-size="100"
           >
             <el-button type="primary" @click="router.push('/dashboard')">
-              上传资料并生成练习
+              去出题中心生成练习
             </el-button>
           </el-empty>
         </template>
@@ -160,10 +181,21 @@ onMounted(() => {
             {{ formatDate(row.createdAt) }}
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="140" fixed="right">
+        <el-table-column label="操作" width="200" fixed="right">
           <template #default="{ row }">
             <el-button type="primary" link @click="handleView(row)">
               {{ hasScore(row) ? '查看' : '继续作答' }}
+            </el-button>
+            <el-button
+              v-if="hasScore(row)"
+              type="primary"
+              link
+              @click="handleRetry(row)"
+            >
+              再做一次
+            </el-button>
+            <el-button type="danger" link @click="handleDelete(row)">
+              删除
             </el-button>
           </template>
         </el-table-column>
