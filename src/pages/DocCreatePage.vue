@@ -4,7 +4,7 @@ import type { UploadRequestOptions } from 'element-plus'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { Loading, UploadFilled } from '@element-plus/icons-vue'
-import { startParse, uploadDoc } from '../services/docs'
+import { uploadMaterial } from '../services/docs'
 
 const router = useRouter()
 const uploading = ref(false)
@@ -22,9 +22,8 @@ const beforeUpload = (file: File) => {
 const handleUpload = async (options: UploadRequestOptions) => {
   try {
     uploading.value = true
-    const data = await uploadDoc(options.file as File, { saveToLibrary: true })
-    await startParse(data.docId)
-    ElMessage.success('已保存到资料库，正在解析，可在列表中查看解析状态')
+    const data = await uploadMaterial(options.file as File, { saveToLibrary: true })
+    ElMessage.success('已保存到资料库')
     options.onSuccess?.(data)
     router.push('/docs')
   } catch (err) {

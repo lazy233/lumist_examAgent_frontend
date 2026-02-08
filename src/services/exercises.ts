@@ -22,6 +22,13 @@ export const generateExercise = (params: GenerateExerciseParams) => {
   return http.post<GenerateExerciseResponse>('/exercises/generate', params)
 }
 
+/** Token 消耗信息 */
+export interface UsageInfo {
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+}
+
 /** 出题中心：根据文字材料请求大模型分析，返回给用户确认的信息 */
 export interface AnalyzeForConfirmParams {
   content: string
@@ -32,15 +39,35 @@ export interface AnalyzeForConfirmParams {
 
 export interface AnalyzeForConfirmResponse {
   keyPoints: string[]
+  questionType?: string
+  questionTypeLabel?: string
+  difficulty?: string
+  difficultyLabel?: string
+  count?: number
+  usage?: UsageInfo
 }
 
 export const analyzeForConfirm = (params: AnalyzeForConfirmParams) => {
   return http.post<AnalyzeForConfirmResponse>('/exercises/analyze', params)
 }
 
-/** 出题中心：用户确认后流式生成题目；onChunk 每收到一段文本调用一次，onDone 结束时调用并带上 exerciseId */
+/** 文件分析接口：multipart/form-data，字段 file */
+export interface AnalyzeFileResponse {
+  content: string
+  title: string
+  usage: UsageInfo | null
+}
+
+export const analyzeFile = (file: File) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  return http.post<AnalyzeFileResponse>('/exercises/analyze-file', formData)
+}
+
+/** 出题中心：用户确认后流式生成题目；onChunk 每收到一段文本调用一次，onDone 结束时调用并带上 exerciseId 和 usage */
 export interface GenerateFromTextParams {
   content: string
+  title?: string | null
   questionType: string
   difficulty: string
   count: number
@@ -48,7 +75,11 @@ export interface GenerateFromTextParams {
 
 export const generateExerciseStreamFromText = async (
   params: GenerateFromTextParams,
-  callbacks: { onChunk: (text: string) => void; onDone: (exerciseId: string) => void; onError: (err: Error) => void }
+  callbacks: {
+    onChunk: (text: string) => void
+    onDone: (exerciseId: string, usage?: UsageInfo) => void
+    onError: (err: Error) => void
+  }
 ) => {
   const token = getToken()
   const url = `${API_BASE_URL}/exercises/generate-from-text`
@@ -58,7 +89,13 @@ export const generateExerciseStreamFromText = async (
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
-    body: JSON.stringify(params),
+    body: JSON.stringify({
+      content: params.content,
+      title: params.title ?? null,
+      questionType: params.questionType,
+      difficulty: params.difficulty,
+      count: params.count,
+    }),
   })
   if (!res.ok) {
     const text = await res.text()
@@ -86,18 +123,26 @@ export const generateExerciseStreamFromText = async (
       callbacks.onChunk(text)
     }
     let exerciseId = ''
+    let usage: UsageInfo | undefined
     const lines = buffer.trimEnd().split(/\r?\n/)
     const lastLine = lines[lines.length - 1]?.trim() || ''
     try {
-      const last = JSON.parse(lastLine) as { exerciseId?: string }
+      const last = JSON.parse(lastLine) as { exerciseId?: string; usage?: UsageInfo }
       if (last && typeof last.exerciseId === 'string') {
         exerciseId = last.exerciseId
+        if (last.usage && typeof last.usage === 'object') {
+          usage = {
+            inputTokens: Number(last.usage.inputTokens) || 0,
+            outputTokens: Number(last.usage.outputTokens) || 0,
+            totalTokens: Number(last.usage.totalTokens) || 0,
+          }
+        }
         lines.pop()
       }
     } catch {
       // 最后一行不是 JSON，整段都是题目内容，exerciseId 为空
     }
-    callbacks.onDone(exerciseId)
+    callbacks.onDone(exerciseId, usage)
   } catch (e) {
     callbacks.onError(e instanceof Error ? e : new Error('流式读取失败'))
   }
@@ -170,4 +215,8 @@ export const getExercisesList = (params?: {
   pageSize?: number
 }) => {
   return http.get<ExercisesListResponse>('/exercises', { params })
+}
+
+export const deleteExercise = (exerciseId: string) => {
+  return http.delete(`/exercises/${exerciseId}`)
 }
