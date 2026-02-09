@@ -2,39 +2,34 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
-import { Loading, UploadFilled } from '@element-plus/icons-vue'
-import { getDocFile, getDocsList } from '../services/docs'
-import type { DocListItem } from '../services/docs'
+import { CircleCheck, Loading, UploadFilled } from '@element-plus/icons-vue'
+import { getDocsList, startParse, uploadDoc } from '../services/docs'
+import type { DocListItem, DocParsed } from '../services/docs'
 import { dashboardPresets } from '../config/dashboardPresets'
 import type { UsageInfo } from '../services/exercises'
-import { analyzeFile, analyzeForConfirm, generateExerciseStreamFromText } from '../services/exercises'
+import { analyzeForConfirm, generateExerciseStreamFromText } from '../services/exercises'
 
 const router = useRouter()
 const fileInputRef = ref<HTMLInputElement | null>(null)
 
-// 文档出题方式：资料库出题 | 上传文件
-const uploadMode = ref<'doc_lib' | 'upload'>('upload')
 const docList = ref<DocListItem[]>([])
 const docListLoading = ref(false)
 const selectedDocId = ref('')
 
-/** 上传模式：用户选择的文件（不跳转，仅在本页出题） */
+/** 用户选择的文件（本地上传） */
 const selectedFile = ref<File | null>(null)
 /** 当前显示的文件标题（上传文件名 或 资料库选中的文档名） */
 const displayedFileTitle = ref('')
+const isDragOver = ref(false)
+
+/** 是否已有文件/资料可出题 */
+const hasFileSource = computed(() => !!selectedFile.value || !!selectedDocId.value)
 
 const loadDocList = async () => {
-  if (uploadMode.value !== 'doc_lib') return
   docListLoading.value = true
   try {
     const res = await getDocsList({ pageSize: 100 })
     docList.value = res.items ?? []
-    const first = docList.value[0]
-    if (first && !selectedDocId.value) {
-      selectedDocId.value = first.docId
-    }
-    const doc = docList.value.find((d) => d.docId === selectedDocId.value)
-    if (doc) displayedFileTitle.value = doc.fileName || doc.docId
   } catch {
     docList.value = []
   } finally {
@@ -46,6 +41,10 @@ const loadDocList = async () => {
 const fileAnalyzeResult = ref<{ content: string; title: string } | null>(null)
 /** 文件流下用户可编辑的标题 */
 const fileTitleEdit = ref('')
+/** 文件解析流式状态 */
+const fileParseStatusText = ref('')
+const fileParseLogs = ref<string[]>([])
+let currentParseAbort: { abort: () => void } | null = null
 
 // 核心输入区
 const inputText = ref('')
@@ -69,7 +68,7 @@ const difficultyOptions = [
 const selectedDifficulty = ref('medium')
 
 // 生成数量
-const count = ref(5)
+const count = ref(1)
 const minCount = 1
 const maxCount = 50
 const incrementCount = () => {
@@ -80,7 +79,7 @@ defineExpose({ incrementCount })
 // 动态交互面板
 type PanelMode = 'message' | 'wait_confirm' | 'preview'
 const panelMode = ref<PanelMode>('message')
-const panelMessage = ref('输入文字材料后点击「AI 出题」，也可用右上角上传文档。')
+const panelMessage = ref('输入文字材料后点击「AI 出题」，或选择/上传文件后出题。')
 /** 是否为文件出题流程（文件分析结果的确认） */
 const isFileFlow = ref(false)
 const confirmData = ref<{
@@ -174,17 +173,40 @@ const getContentForGenerate = () => {
 const getParamsForGenerate = () => {
   const d = confirmData.value
   const title = isFileFlow.value ? (fileTitleEdit.value.trim() || fileAnalyzeResult.value?.title || null) : null
+  const keyPoints = d?.keyPoints ?? []
+  const analysis = isFileFlow.value ? '' : (editableConfirmContent.value.trim() || d?.keyPoints?.join('\n') || '')
   return {
     content: getContentForGenerate(),
     title,
     questionType: d?.questionType ?? selectedType.value,
     difficulty: d?.difficulty ?? selectedDifficulty.value,
     count: d?.count ?? count.value,
+    keyPoints,
+    analysis,
   }
 }
 
-/** 执行文件分析并进入确认 */
-const runFileAnalyze = async (file: File) => {
+const resetFileParseStream = () => {
+  fileParseStatusText.value = ''
+  fileParseLogs.value = []
+}
+
+const buildParsedContent = (parsed: DocParsed) => {
+  const sections: string[] = []
+  const info: string[] = []
+  if (parsed.school) info.push(`学校：${parsed.school}`)
+  if (parsed.major) info.push(`专业：${parsed.major}`)
+  if (parsed.course) info.push(`课程：${parsed.course}`)
+  if (info.length) sections.push(info.join(' / '))
+  if (parsed.summary) sections.push(`摘要：\n${parsed.summary}`)
+  if (parsed.knowledgePoints?.length) {
+    sections.push(`知识点：\n- ${parsed.knowledgePoints.join('\n- ')}`)
+  }
+  return sections.join('\n\n')
+}
+
+/** 执行资料解析（SSE）并进入确认 */
+const runDocParseStream = async (docId: string, fileName: string) => {
   panelMode.value = 'wait_confirm'
   confirmData.value = null
   fileAnalyzeResult.value = null
@@ -192,45 +214,102 @@ const runFileAnalyze = async (file: File) => {
   isFileFlow.value = true
   isEditingConfirm.value = false
   confirmLoading.value = true
+  resetFileParseStream()
+
+  if (currentParseAbort) currentParseAbort.abort()
+  fileParseStatusText.value = '正在解析材料，请稍候…'
+
+  const typeLabel = questionTypeOptions.find((o) => o.value === selectedType.value)?.label ?? '单选题'
+  const diffLabel = difficultyOptions.find((o) => o.value === selectedDifficulty.value)?.label ?? '中等'
+
+  const parseTask = startParse(docId, {
+    onStatus: (data) => {
+      fileParseStatusText.value = '解析开始…'
+      fileParseLogs.value = [...fileParseLogs.value, `状态：${data.status}`]
+    },
+    onProgress: (data) => {
+      fileParseStatusText.value = `处理中：${data.stage}`
+      fileParseLogs.value = [...fileParseLogs.value, `阶段：${data.stage}`]
+    },
+    onChunk: (data) => {
+      if (!fileAnalyzeResult.value) {
+        fileAnalyzeResult.value = { content: '', title: fileName }
+      }
+      fileAnalyzeResult.value.content += data.content || ''
+    },
+    onResult: (data) => {
+      const content = buildParsedContent(data.parsed)
+      fileAnalyzeResult.value = { content, title: fileName }
+      fileTitleEdit.value = data.parsed.course || fileName
+      confirmData.value = {
+        keyPoints: ['材料内容见下方'],
+        questionType: selectedType.value,
+        questionTypeLabel: typeLabel,
+        difficulty: selectedDifficulty.value,
+        difficultyLabel: diffLabel,
+        count: count.value,
+      }
+      confirmLoading.value = false
+    },
+    onError: (data) => {
+      panelMessage.value = data.detail || '文件解析失败，请稍后重试。'
+      panelMode.value = 'message'
+      isFileFlow.value = false
+      confirmLoading.value = false
+    },
+    onClose: () => {
+      if (confirmLoading.value) {
+        confirmLoading.value = false
+      }
+    },
+  })
+  currentParseAbort = parseTask
   try {
-    const res = await analyzeFile(file)
-    fileAnalyzeResult.value = { content: res.content, title: res.title }
-    fileTitleEdit.value = res.title
-    usageAnalyze.value = res.usage ?? null
-    const typeLabel = questionTypeOptions.find((o) => o.value === selectedType.value)?.label ?? '单选题'
-    const diffLabel = difficultyOptions.find((o) => o.value === selectedDifficulty.value)?.label ?? '中等'
-    confirmData.value = {
-      keyPoints: ['材料内容见下方'],
-      questionType: selectedType.value,
-      questionTypeLabel: typeLabel,
-      difficulty: selectedDifficulty.value,
-      difficultyLabel: diffLabel,
-      count: count.value,
-    }
+    await parseTask.done
   } catch {
-    panelMessage.value = '文件分析失败，请稍后重试。'
+    if (confirmLoading.value) {
+      panelMessage.value = '文件解析失败，请稍后重试。'
+      panelMode.value = 'message'
+      isFileFlow.value = false
+      confirmLoading.value = false
+    }
+  }
+}
+
+/** 上传文件出题：先上传，后 SSE 解析 */
+const handleFileFromUpload = async () => {
+  const file = selectedFile.value
+  if (!file) return
+  try {
+    panelMode.value = 'wait_confirm'
+    confirmData.value = null
+    fileAnalyzeResult.value = null
+    usageAnalyze.value = null
+    isFileFlow.value = true
+    isEditingConfirm.value = false
+    confirmLoading.value = true
+    resetFileParseStream()
+    fileParseStatusText.value = '正在上传文件…'
+    const res = await uploadDoc(file, { saveToLibrary: false })
+    const fileName = res.fileName || file.name
+    displayedFileTitle.value = fileName
+    await runDocParseStream(res.docId, fileName)
+  } catch {
+    panelMessage.value = '文件上传失败，请稍后重试。'
     panelMode.value = 'message'
     isFileFlow.value = false
-  } finally {
     confirmLoading.value = false
   }
 }
 
-/** 资料库出题：获取文件后分析 */
+/** 资料库出题：SSE 解析 */
 const handleFileFromDocLib = async () => {
   const docId = selectedDocId.value
   if (!docId) return
   const doc = docList.value.find((d) => d.docId === docId)
   const fileName = doc?.fileName || docId
   displayedFileTitle.value = fileName
-  try {
-    const blob = await getDocFile(docId)
-    const file = new File([blob], fileName, { type: blob.type || 'application/octet-stream' })
-    await runFileAnalyze(file)
-  } catch {
-    panelMessage.value = '获取文件失败，请稍后重试。'
-    panelMode.value = 'message'
-  }
+  await runDocParseStream(docId, fileName)
 }
 
 /** 文本出题：调用分析接口 */
@@ -247,6 +326,7 @@ const handleTextAnalyze = async (useAnalyzeApi = true) => {
   usageAnalyze.value = null
   isFileFlow.value = false
   isEditingConfirm.value = false
+  resetFileParseStream()
 
   if (!useAnalyzeApi) {
     const typeLabel = questionTypeOptions.find((o) => o.value === selectedType.value)?.label ?? '单选题'
@@ -303,10 +383,9 @@ const handleTextAnalyze = async (useAnalyzeApi = true) => {
 
 /** 统一出题入口：根据是否有文件走不同逻辑 */
 const handleAiGenerate = async (useAnalyzeApi = true) => {
-  const hasFile = (uploadMode.value === 'upload' && selectedFile.value) || (uploadMode.value === 'doc_lib' && selectedDocId.value)
-  if (hasFile) {
-    if (uploadMode.value === 'upload') {
-      await runFileAnalyze(selectedFile.value!)
+  if (hasFileSource.value) {
+    if (selectedFile.value) {
+      await handleFileFromUpload()
     } else {
       await handleFileFromDocLib()
     }
@@ -377,115 +456,182 @@ const beforeFileSelect = (file: File) => {
   return true
 }
 
-// 选择文件：仅存储并显示标题，不跳转
+// 选择文件：仅存储并显示标题，不跳转；选择文件时清空资料库选择
+const applySelectedFile = (file: File) => {
+  if (!beforeFileSelect(file)) return
+  selectedDocId.value = ''
+  selectedFile.value = file
+  displayedFileTitle.value = file.name
+}
+
 const onFileSelected = (e: Event) => {
   const target = e.target as HTMLInputElement
   const file = target.files?.[0]
   if (!file) return
-  if (!beforeFileSelect(file)) {
-    target.value = ''
-    return
-  }
-  selectedFile.value = file
-  displayedFileTitle.value = file.name
+  applySelectedFile(file)
   target.value = ''
+}
+
+const onDropFile = (e: DragEvent) => {
+  e.preventDefault()
+  isDragOver.value = false
+  const file = e.dataTransfer?.files?.[0]
+  if (file) applySelectedFile(file)
 }
 
 const triggerUpload = () => fileInputRef.value?.click()
 
-watch(uploadMode, (mode) => {
+/** 格式化文件大小显示 */
+const formatFileSize = (file: File): string => {
+  const n = file.size
+  if (n < 1024) return n + ' B'
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB'
+  return (n / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
+/** 获取文件扩展名（用于展示） */
+const getFileExt = (file: File): string => {
+  const ext = file.name.split('.').pop()?.toUpperCase() ?? ''
+  return ext ? `.${ext}` : ''
+}
+
+/** 清除已选文件 */
+const clearSelectedFile = () => {
   selectedFile.value = null
   displayedFileTitle.value = ''
-  if (mode === 'doc_lib') loadDocList()
-})
+  if (fileInputRef.value) fileInputRef.value.value = ''
+}
+
+/** 清除已选资料 */
+const clearSelectedDoc = () => {
+  selectedDocId.value = ''
+  displayedFileTitle.value = ''
+}
+
+/** 替换为上传文件：清空资料，触发文件选择 */
+const replaceWithUpload = () => {
+  clearSelectedDoc()
+  triggerUpload()
+}
+
 watch(selectedDocId, (id) => {
-  if (uploadMode.value === 'doc_lib' && id) {
+  if (id) {
+    selectedFile.value = null
     const doc = docList.value.find((d) => d.docId === id)
     displayedFileTitle.value = doc?.fileName || id
+  } else {
+    displayedFileTitle.value = ''
   }
 })
 onMounted(() => {
-  if (uploadMode.value === 'doc_lib') loadDocList()
+  loadDocList()
 })
 </script>
 
 <template>
   <div class="page dashboard-page">
-    <!-- 顶部：标题 + 上传入口 -->
+    <!-- 顶部：标题 + 资料库选择 -->
     <div class="top-bar">
       <h1 class="page-title">出题中心</h1>
-      <div class="upload-entry">
+      <div class="top-actions">
+        <span class="top-actions-label">资料库</span>
         <el-select
-          v-model="uploadMode"
+          v-model="selectedDocId"
+          placeholder="选择资料"
           size="default"
-          class="upload-mode-select"
-          style="width: 140px"
+          :loading="docListLoading"
+          filterable
+          class="top-doc-select"
         >
-          <el-option value="doc_lib" label="资料库出题" />
-          <el-option value="upload" label="上传文件" />
-        </el-select>
-        <!-- 资料库出题：选择资料 -->
-        <template v-if="uploadMode === 'doc_lib'">
-          <el-select
-            v-model="selectedDocId"
-            placeholder="选择资料"
-            size="default"
-            :loading="docListLoading"
-            filterable
-            style="width: 200px"
-          >
-            <el-option
-              v-for="d in docList"
-              :key="d.docId"
-              :value="d.docId"
-              :label="d.fileName || d.docId"
-            />
-          </el-select>
-          <el-button
-            type="primary"
-            size="default"
-            :loading="confirmLoading"
-            :disabled="!selectedDocId"
-            @click="handleFileFromDocLib"
-          >
-            用此资料出题
-          </el-button>
-        </template>
-        <!-- 上传文件：选择文件 + 保存到资料库 -->
-        <template v-else>
-          <input
-            ref="fileInputRef"
-            type="file"
-            accept=".pdf,.docx,.pptx,.txt"
-            class="file-input"
-            @change="onFileSelected"
+          <el-option
+            v-for="d in docList"
+            :key="d.docId"
+            :value="d.docId"
+            :label="d.fileName || d.docId"
           />
-          <el-button
-            size="default"
-            class="upload-btn"
-            @click="triggerUpload"
-          >
-            <el-icon><UploadFilled /></el-icon>
-            选择文件出题
-          </el-button>
-        </template>
-        <span class="upload-hint">支持 pdf / docx / pptx / txt</span>
-        <span v-if="displayedFileTitle" class="file-title-display">当前：{{ displayedFileTitle }}</span>
+        </el-select>
       </div>
     </div>
+
+    <!-- 统一卡片：上传文件 + 资料库选择 -->
+    <el-card class="upload-card" shadow="never">
+      <input
+        ref="fileInputRef"
+        type="file"
+        accept=".pdf,.docx,.pptx,.txt"
+        class="file-input"
+        @change="onFileSelected"
+      />
+      <!-- 未选择：大框上传 -->
+      <div v-if="!hasFileSource" class="upload-zone-wrap">
+        <div
+          class="upload-zone upload-zone--empty"
+          :class="{ 'is-dragover': isDragOver }"
+          @click="triggerUpload"
+          @dragenter.prevent="isDragOver = true"
+          @dragover.prevent="isDragOver = true"
+          @dragleave.prevent="isDragOver = false"
+          @drop="onDropFile"
+        >
+          <el-icon class="upload-zone-icon"><UploadFilled /></el-icon>
+          <div class="upload-zone-text">点击选择文件</div>
+          <div class="upload-zone-hint-row">
+            <span class="upload-zone-hint">支持 pdf / docx / pptx / txt</span>
+            <span class="upload-zone-hint-secondary">也可从右上角资料库选择</span>
+          </div>
+        </div>
+      </div>
+      <!-- 已选择：统一的文件/资料展示区块 -->
+      <div v-else class="upload-file-block">
+        <div v-if="confirmLoading" class="upload-file-analyzing">
+          <el-icon class="is-loading"><Loading /></el-icon>
+          <span>正在分析材料…</span>
+        </div>
+        <div class="upload-file-header">
+          <el-icon class="upload-file-status-icon success"><CircleCheck /></el-icon>
+          <span>当前已选文件</span>
+        </div>
+        <div class="upload-file-meta">
+          <template v-if="selectedFile">
+            <span class="upload-file-name">{{ displayedFileTitle }}</span>
+            <span class="upload-file-type">{{ getFileExt(selectedFile) }}</span>
+            <span class="upload-file-size">{{ formatFileSize(selectedFile) }}</span>
+          </template>
+          <template v-else>
+            <span class="upload-file-name">{{ displayedFileTitle }}</span>
+            <span class="upload-file-type">资料库</span>
+          </template>
+          <span class="upload-file-badge success">已就绪</span>
+        </div>
+        <div class="upload-file-actions">
+          <el-button size="small" @click="selectedFile ? triggerUpload() : replaceWithUpload()">
+            {{ selectedFile ? '替换文件' : '替换为上传文件' }}
+          </el-button>
+          <el-button size="small" type="danger" plain @click="selectedFile ? clearSelectedFile() : clearSelectedDoc()">
+            {{ selectedFile ? '删除文件' : '清空选择' }}
+          </el-button>
+        </div>
+      </div>
+    </el-card>
 
     <!-- 主内容区：输入 + 控制 + 面板 -->
     <div class="main-card">
       <div class="input-row">
-        <el-input
-          v-model="inputText"
-          type="textarea"
-          :rows="4"
-          placeholder="输入文字材料或指令，AI 将根据内容出题…"
-          maxlength="1000"
-          show-word-limit
-          class="main-textarea"
-        />
+        <div class="input-card">
+          <div class="input-card-header">
+            <span class="input-card-title">题目输入</span>
+            <span class="input-card-tip">支持粘贴文本或指令</span>
+          </div>
+          <el-input
+            v-model="inputText"
+            type="textarea"
+            :rows="4"
+            placeholder="输入文字材料或指令，AI 将根据内容出题…"
+            maxlength="1000"
+            show-word-limit
+            class="main-textarea"
+          />
+        </div>
       </div>
 
       <!-- 一键生成预设（暂时隐藏） -->
@@ -542,7 +688,13 @@ onMounted(() => {
           />
           <span class="count-unit">道</span>
         </div>
-        <el-button type="primary" size="large" class="ai-btn" @click="handleAiGenerate">
+        <el-button
+          type="primary"
+          size="large"
+          class="ai-btn"
+          :disabled="confirmLoading"
+          @click="handleAiGenerate"
+        >
           AI 出题
         </el-button>
       </div>
@@ -557,7 +709,18 @@ onMounted(() => {
             <template v-if="confirmLoading">
               <div class="panel-loading-hint">
                 <el-icon class="is-loading"><Loading /></el-icon>
-                <span>正在分析材料，请稍候…</span>
+                <span>{{ fileParseStatusText || '正在分析材料，请稍候…' }}</span>
+              </div>
+              <div v-if="fileParseLogs.length" class="panel-stream-log">
+                <div class="panel-stream-log-title">解析进度</div>
+                <pre class="panel-stream-text">{{ fileParseLogs.join('\n') }}</pre>
+              </div>
+              <div v-if="isFileFlow && fileAnalyzeResult?.content" class="panel-stream-preview">
+                <div class="panel-stream-header">
+                  <span class="panel-stream-dot" />
+                  <span class="panel-stream-title">实时解析内容</span>
+                </div>
+                <div class="panel-stream-content">{{ fileAnalyzeResult.content }}</div>
               </div>
             </template>
             <template v-else-if="isEditingConfirm">
@@ -696,28 +859,25 @@ onMounted(() => {
   flex-wrap: nowrap;
   min-width: 0;
 }
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.top-actions-label {
+  font-size: 13px;
+  color: #606266;
+}
+.top-doc-select {
+  width: 220px;
+}
 .page-title {
   margin: 0;
   font-size: 22px;
   font-weight: 600;
   color: #1f2329;
   letter-spacing: -0.02em;
-  flex-shrink: 0;
-}
-.upload-entry {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: nowrap;
-  flex-shrink: 0;
-  min-width: 0;
-  overflow-x: auto;
-  padding-bottom: 4px;
-}
-.upload-entry .upload-mode-select,
-.upload-entry .el-select,
-.upload-entry .el-button,
-.upload-entry .el-checkbox {
   flex-shrink: 0;
 }
 .file-input {
@@ -737,6 +897,171 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
+/* 卡片式上传组件（仅上传模式） */
+.upload-card {
+  border-radius: 12px;
+  border: 1px solid #ebeef5;
+  overflow: hidden;
+}
+.upload-card :deep(.el-card__body) {
+  padding: 10px 12px;
+  min-height: 120px;
+}
+.upload-zone {
+  padding: 4px 8px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s;
+}
+.upload-zone--empty {
+  border: 2px dashed #dcdfe6;
+  border-radius: 10px;
+  margin: 16px;
+  background: #fafbfc;
+}
+.upload-zone--empty:hover {
+  border-color: var(--el-color-primary-light-5);
+  background: #f0f9ff;
+}
+.upload-zone--empty.is-dragover {
+  border-color: var(--el-color-primary);
+  background: #eef7ff;
+  box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.15);
+}
+.upload-zone-icon {
+  font-size: 36px;
+  color: #c0c4cc;
+  margin-bottom: 0;
+  display: block;
+}
+.upload-zone--empty:hover .upload-zone-icon {
+  color: var(--el-color-primary);
+}
+.upload-zone-text {
+  font-size: 14px;
+  font-weight: 500;
+  color: #303133;
+  margin-bottom: 0;
+  line-height: 1.3;
+}
+.upload-zone-hint-row {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px 12px;
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.3;
+}
+.upload-zone-hint {
+  color: #909399;
+}
+.upload-zone-hint-secondary {
+  color: #909399;
+}
+.upload-zone-wrap {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  height: 100%;
+}
+.upload-zone-wrap .upload-zone--empty {
+  margin: 0;
+}
+.upload-file-block {
+  padding: 10px 12px;
+  position: relative;
+  background: linear-gradient(135deg, #f0f9ff 0%, #fff 100%);
+  border-radius: 10px;
+  margin: 0;
+  border: 1px solid #d9ecff;
+  height: 100%;
+}
+.upload-file-analyzing {
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-size: 14px;
+  color: #606266;
+}
+.upload-file-analyzing .el-icon.is-loading {
+  font-size: 20px;
+}
+.upload-file-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #303133;
+  margin-bottom: 10px;
+}
+.upload-file-status-icon {
+  font-size: 20px;
+}
+.upload-file-status-icon.success {
+  color: #67c23a;
+}
+.upload-file-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 16px;
+  margin-bottom: 14px;
+  font-size: 13px;
+}
+.upload-file-name {
+  font-weight: 500;
+  color: #303133;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.upload-file-type,
+.upload-file-size {
+  color: #606266;
+}
+.upload-file-badge {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+}
+.upload-file-badge.success {
+  background: #e1f3d8;
+  color: #67c23a;
+}
+.upload-file-actions {
+  display: flex;
+  gap: 10px;
+}
+.upload-block-hint {
+  font-size: 13px;
+  color: #e6a23c;
+  font-weight: 500;
+  margin-right: 12px;
+}
+.ai-btn--disabled-upload:not(:disabled) {
+  opacity: 0.65;
+}
+.ai-btn:disabled {
+  cursor: not-allowed;
+}
+
 .main-card {
   background: #fff;
   border-radius: 12px;
@@ -752,16 +1077,46 @@ onMounted(() => {
 .input-row {
   width: 100%;
 }
+.input-card {
+  background: #f8fafc;
+  border: 1px solid #e6ebf5;
+  border-radius: 12px;
+  padding: 12px 14px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
+}
+.input-card:focus-within {
+  background: #fff;
+  border-color: var(--lumist-secondary);
+  box-shadow: 0 0 0 3px rgba(var(--lumist-secondary-rgb), 0.15);
+}
+.input-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.input-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+}
+.input-card-tip {
+  font-size: 12px;
+  color: #909399;
+}
 .main-textarea :deep(.el-textarea__inner) {
   border-radius: 8px;
-  padding: 12px 14px;
+  padding: 0;
   font-size: 14px;
   line-height: 1.6;
-  border-color: #e4e7ed;
+  border: none;
+  box-shadow: none;
+  background: transparent;
+  resize: none;
 }
 .main-textarea :deep(.el-textarea__inner):focus {
-  border-color: var(--lumist-secondary);
-  box-shadow: 0 0 0 2px rgba(var(--lumist-secondary-rgb), 0.15);
+  border-color: transparent;
+  box-shadow: none;
 }
 
 .preset-row {
@@ -890,8 +1245,9 @@ onMounted(() => {
   margin-top: 12px;
 }
 .confirm-section .confirm-label {
-  display: block;
+  display: inline-block;
   margin-bottom: 8px;
+  white-space: nowrap;
 }
 .confirm-key-points {
   margin: 0;
@@ -912,11 +1268,6 @@ onMounted(() => {
   line-height: 1.6;
   color: #606266;
   white-space: pre-wrap;
-}
-.file-title-display {
-  font-size: 13px;
-  color: #606266;
-  margin-left: 8px;
 }
 .usage-row {
   margin-top: 12px;
@@ -966,6 +1317,60 @@ onMounted(() => {
 }
 .panel-loading-hint .el-icon {
   font-size: 18px;
+}
+.panel-stream-log {
+  margin-top: 10px;
+  background: #f8f9fb;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  padding: 10px 12px;
+  max-height: 120px;
+  overflow: auto;
+}
+.panel-stream-log-title {
+  font-size: 12px;
+  color: #909399;
+  margin-bottom: 6px;
+}
+.panel-stream-text {
+  margin: 0;
+  font-size: 12px;
+  color: #606266;
+  white-space: pre-wrap;
+}
+.panel-stream-preview {
+  margin-top: 10px;
+  border: 1px solid #dfe7ff;
+  background: linear-gradient(135deg, #f5f8ff 0%, #ffffff 60%);
+  border-radius: 8px;
+  padding: 12px 14px;
+  max-height: 180px;
+  overflow: auto;
+}
+.panel-stream-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.panel-stream-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #409eff;
+  box-shadow: 0 0 0 3px rgba(64, 158, 255, 0.15);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+.panel-stream-title {
+  font-size: 12px;
+  color: #4c6fff;
+  font-weight: 600;
+}
+.panel-stream-content {
+  font-size: 13px;
+  color: #303133;
+  line-height: 1.6;
+  white-space: pre-wrap;
 }
 .panel-preview {
   flex: 1;
@@ -1041,13 +1446,20 @@ onMounted(() => {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
+@keyframes pulse {
+  0%, 100% { transform: scale(1); opacity: 0.9; }
+  50% { transform: scale(1.2); opacity: 0.5; }
+}
 
 @media (max-width: 768px) {
   .top-bar {
     flex-direction: column;
     align-items: flex-start;
   }
-  .upload-entry {
+  .top-actions {
+    width: 100%;
+  }
+  .top-doc-select {
     width: 100%;
   }
   .preset-row {

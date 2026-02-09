@@ -5,6 +5,8 @@ import { getToken, getUser, removeToken, removeUser, setToken, setUser } from '.
 export interface UserInfo {
   id: string
   name: string
+  /** 用户名（后端可能只返回 username，用于显示回退） */
+  username?: string
   /** 学校 */
   school?: string
   /** 专业 */

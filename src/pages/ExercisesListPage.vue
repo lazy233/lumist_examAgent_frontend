@@ -14,6 +14,7 @@ const keyword = ref('')
 const difficulty = ref<Difficulty | ''>('')
 const page = ref(1)
 const pageSize = ref(10)
+const selectedRows = ref<ExerciseListItem[]>([])
 
 const difficultyMap: Record<Difficulty, string> = {
   easy: '简单',
@@ -40,6 +41,7 @@ const fetchList = async () => {
     })
     list.value = res.items || []
     total.value = res.total || 0
+    selectedRows.value = []
   } catch {
     list.value = []
     total.value = 0
@@ -86,6 +88,37 @@ const handleDelete = async (row: ExerciseListItem) => {
   }
 }
 
+const handleSelectionChange = (rows: ExerciseListItem[]) => {
+  selectedRows.value = rows
+}
+
+const handleBatchDelete = async () => {
+  if (!selectedRows.value.length) return
+  const names = selectedRows.value
+    .slice(0, 5)
+    .map((r) => r.title || r.exerciseId)
+    .join('、')
+  const more = selectedRows.value.length > 5 ? '…' : ''
+  await ElMessageBox.confirm(
+    `确定删除选中的 ${selectedRows.value.length} 份练习吗？\n${names}${more}\n删除后无法恢复。`,
+    '批量删除',
+    {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+    }
+  )
+  try {
+    await Promise.all(selectedRows.value.map((row) => deleteExercise(row.exerciseId)))
+    ElMessage.success(`已删除 ${selectedRows.value.length} 份练习`)
+    fetchList()
+  } catch {
+    // error handled by http interceptor
+  }
+}
+
+const rowKeyExercise = (row: ExerciseListItem) => row.exerciseId
+
 const hasScore = (row: ExerciseListItem) => row.score != null
 
 const formatDate = (dateStr: string) => {
@@ -108,6 +141,16 @@ onMounted(() => {
       <template #header>
         <div class="card-header">
           <span>我的练习</span>
+          <div class="header-actions">
+            <el-button
+              type="danger"
+              plain
+              :disabled="!selectedRows.length"
+              @click="handleBatchDelete"
+            >
+              批量删除
+            </el-button>
+          </div>
         </div>
       </template>
 
@@ -152,6 +195,8 @@ onMounted(() => {
         :data="list"
         stripe
         style="width: 100%; margin-top: 16px"
+        :row-key="rowKeyExercise"
+        @selection-change="handleSelectionChange"
       >
         <template #empty>
           <el-empty
@@ -164,6 +209,7 @@ onMounted(() => {
             </el-button>
           </el-empty>
         </template>
+        <el-table-column type="selection" width="48" />
         <el-table-column prop="title" label="练习标题" min-width="180" />
         <el-table-column prop="count" label="题量" width="80" />
         <el-table-column label="难度" width="90">
@@ -219,6 +265,11 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .error-bar {

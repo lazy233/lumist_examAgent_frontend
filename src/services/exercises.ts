@@ -71,6 +71,10 @@ export interface GenerateFromTextParams {
   questionType: string
   difficulty: string
   count: number
+  /** 分析要点列表 */
+  keyPoints?: string[]
+  /** 分析总结或用户意图 */
+  analysis?: string
 }
 
 export const generateExerciseStreamFromText = async (
@@ -95,6 +99,8 @@ export const generateExerciseStreamFromText = async (
       questionType: params.questionType,
       difficulty: params.difficulty,
       count: params.count,
+      keyPoints: params.keyPoints ?? [],
+      analysis: params.analysis ?? '',
     }),
   })
   if (!res.ok) {
