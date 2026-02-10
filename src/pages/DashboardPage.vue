@@ -70,7 +70,7 @@ const selectedDifficulty = ref('medium')
 // 生成数量
 const count = ref(1)
 const minCount = 1
-const maxCount = 50
+const maxCount = 1000
 const incrementCount = () => {
   if (count.value < maxCount) count.value++
 }

@@ -22,6 +22,19 @@ const difficultyMap: Record<Difficulty, string> = {
   hard: '困难',
 }
 
+const generationStatusMap: Record<string, string> = {
+  generating: '生成中',
+  ready: '已生成',
+  failed: '失败',
+}
+
+const generationStatusTypeMap: Record<string, 'info' | 'warning' | 'success' | 'danger'> = {
+  generating: 'warning',
+  ready: 'success',
+  failed: 'danger',
+}
+
+
 const difficultyOptions: { value: '' | Difficulty; label: string }[] = [
   { value: '', label: '全部难度' },
   { value: 'easy', label: '简单' },
@@ -61,11 +74,22 @@ const handleSearch = () => {
   }
 }
 
+const hasScore = (row: ExerciseListItem) => row.score != null
+
+const isReady = (row: ExerciseListItem) => !row.status || row.status === 'ready'
+
+const getActionLabel = (row: ExerciseListItem) => {
+  if (!isReady(row)) return '生成中'
+  return hasScore(row) ? '查看' : '继续作答'
+}
+
 const handleView = (row: ExerciseListItem) => {
+  if (!isReady(row)) return
   router.push(`/exercises/${row.exerciseId}`)
 }
 
 const handleRetry = (row: ExerciseListItem) => {
+  if (!isReady(row)) return
   router.push(`/exercises/${row.exerciseId}?retry=1`)
 }
 
@@ -118,8 +142,6 @@ const handleBatchDelete = async () => {
 }
 
 const rowKeyExercise = (row: ExerciseListItem) => row.exerciseId
-
-const hasScore = (row: ExerciseListItem) => row.score != null
 
 const formatDate = (dateStr: string) => {
   if (!dateStr) return '-'
@@ -210,11 +232,43 @@ onMounted(() => {
           </el-empty>
         </template>
         <el-table-column type="selection" width="48" />
-        <el-table-column prop="title" label="练习标题" min-width="180" />
-        <el-table-column prop="count" label="题量" width="80" />
+        <el-table-column
+          prop="title"
+          label="练习标题"
+          width="200"
+          show-overflow-tooltip
+          class-name="exercise-title-cell"
+        />
+        <el-table-column label="题型" width="100">
+          <template #default="{ row }">
+            {{ row.questionTypeLabel || '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="题目数量" width="100">
+          <template #default="{ row }">
+            {{ row.questionCount ?? row.count ?? '-' }}
+          </template>
+        </el-table-column>
         <el-table-column label="难度" width="90">
           <template #default="{ row }">
             {{ difficultyMap[row.difficulty as Difficulty] || '-' }}
+          </template>
+        </el-table-column>
+        <el-table-column label="生成状态" width="100">
+          <template #default="{ row }">
+            <el-tag :type="generationStatusTypeMap[row.status || 'ready'] || 'info'" size="small">
+              {{ generationStatusMap[row.status || 'ready'] || row.status || '-' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="作答状态" width="100">
+          <template #default="{ row }">
+            <el-tag
+              :type="!isReady(row) ? 'info' : (hasScore(row) ? 'success' : 'warning')"
+              size="small"
+            >
+              {{ !isReady(row) ? '不可作答' : (hasScore(row) ? '已完成' : '未作答') }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="得分" width="90">
@@ -229,13 +283,14 @@ onMounted(() => {
         </el-table-column>
         <el-table-column label="操作" width="200" fixed="right">
           <template #default="{ row }">
-            <el-button type="primary" link @click="handleView(row)">
-              {{ hasScore(row) ? '查看' : '继续作答' }}
+            <el-button type="primary" link :disabled="!isReady(row)" @click="handleView(row)">
+              {{ getActionLabel(row) }}
             </el-button>
             <el-button
               v-if="hasScore(row)"
               type="primary"
               link
+              :disabled="!isReady(row)"
               @click="handleRetry(row)"
             >
               再做一次
@@ -270,6 +325,11 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+.exercise-title-cell :deep(.cell) {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .error-bar {

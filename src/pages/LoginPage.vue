@@ -14,6 +14,7 @@ const authStore = useAuthStore()
 const isRegister = ref(false)
 const formRef = ref<FormInstance>()
 const loading = ref(false)
+const showValidate = ref(false)
 
 const form = reactive({
   username: '',
@@ -49,11 +50,13 @@ const resetForm = () => {
   form.password = ''
   form.confirmPassword = ''
   form.name = ''
+  showValidate.value = false
   formRef.value?.clearValidate()
 }
 
 const handleLogin = async () => {
   if (!formRef.value) return
+  showValidate.value = true
   const valid = await formRef.value.validate().catch(() => false)
   if (!valid) return
   try {
@@ -74,6 +77,7 @@ const handleLogin = async () => {
 
 const handleRegister = async () => {
   if (!formRef.value) return
+  showValidate.value = true
   const valid = await formRef.value.validate().catch(() => false)
   if (!valid) return
   try {
@@ -93,6 +97,7 @@ const handleRegister = async () => {
 }
 
 const handleSubmit = () => {
+  showValidate.value = true
   if (isRegister.value) {
     handleRegister()
   } else {
@@ -101,9 +106,21 @@ const handleSubmit = () => {
 }
 
 const handleSkip = () => {
-  authStore.updateToken('dev-token')
-  authStore.updateUser({ id: 'dev', name: '演示用户' })
-  router.replace('/dashboard')
+  loading.value = true
+  login({ username: 'user', password: '123456' })
+    .then((data) => {
+      authStore.updateToken(data.token)
+      authStore.updateUser({
+        ...data.user,
+        name: data.user.name || (data.user as { username?: string }).username || '',
+      })
+      const redirect = (route.query.redirect as string) || '/dashboard'
+      router.replace(redirect)
+      ElMessage.success('登录成功')
+    })
+    .finally(() => {
+      loading.value = false
+    })
 }
 </script>
 
@@ -130,7 +147,15 @@ const handleSkip = () => {
             <button type="button" class="tab-btn" :class="{ active: isRegister }" @click="isRegister = true; resetForm()">注册</button>
           </div>
           <h2 class="form-card-title">{{ isRegister ? '创建账号' : '账号登录' }}</h2>
-          <el-form ref="formRef" :model="form" :rules="currentRules()" class="login-form" @submit.prevent="handleSubmit">
+          <el-form
+            ref="formRef"
+            :model="form"
+            :rules="currentRules()"
+            :show-message="showValidate"
+            :validate-on-rule-change="false"
+            class="login-form"
+            @submit.prevent="handleSubmit"
+          >
             <el-form-item prop="username">
               <el-input v-model="form.username" placeholder="用户名" size="large" :prefix-icon="User" autocomplete="username" />
             </el-form-item>

@@ -48,7 +48,7 @@ export interface AnalyzeForConfirmResponse {
 }
 
 export const analyzeForConfirm = (params: AnalyzeForConfirmParams) => {
-  return http.post<AnalyzeForConfirmResponse>('/exercises/analyze', params)
+  return http.post<AnalyzeForConfirmResponse>('/exercises/analyze', params, { timeout: 60000 })
 }
 
 /** 文件分析接口：multipart/form-data，字段 file */
@@ -203,6 +203,9 @@ export interface ExerciseListItem {
   exerciseId: string
   title: string
   count: number
+  questionCount?: number
+  questionType?: QuestionType
+  questionTypeLabel?: string
   difficulty: Difficulty
   score?: number
   createdAt: string
