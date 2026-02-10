@@ -13,6 +13,7 @@ const total = ref(0)
 const keyword = ref('')
 const page = ref(1)
 const pageSize = ref(10)
+const selectedRows = ref<DocListItem[]>([])
 
 const statusMap: Record<DocStatus, string> = {
   uploaded: '已上传',
@@ -39,6 +40,7 @@ const fetchList = async () => {
     })
     list.value = res.items || []
     total.value = res.total || 0
+    selectedRows.value = []
   } catch {
     list.value = []
     total.value = 0
@@ -81,6 +83,34 @@ const handleDelete = async (row: DocListItem) => {
   }
 }
 
+const handleSelectionChange = (rows: DocListItem[]) => {
+  selectedRows.value = rows
+}
+
+const handleBatchDelete = async () => {
+  if (!selectedRows.value.length) return
+  const names = selectedRows.value.slice(0, 5).map((r) => r.fileName || r.docId).join('、')
+  const more = selectedRows.value.length > 5 ? '…' : ''
+  await ElMessageBox.confirm(
+    `确定删除选中的 ${selectedRows.value.length} 份资料吗？\n${names}${more}\n删除后无法恢复。`,
+    '批量删除',
+    {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+    }
+  )
+  try {
+    await Promise.all(selectedRows.value.map((row) => deleteDoc(row.docId)))
+    ElMessage.success(`已删除 ${selectedRows.value.length} 份资料`)
+    fetchList()
+  } catch {
+    // error handled by http interceptor
+  }
+}
+
+const rowKeyDoc = (row: DocListItem) => row.docId
+
 const formatDate = (dateStr: string) => {
   if (!dateStr) return '-'
   try {
@@ -101,9 +131,19 @@ onMounted(() => {
       <template #header>
         <div class="card-header">
           <span>我的资料</span>
-          <el-button type="primary" @click="router.push('/docs/create')">
-            上传资料
-          </el-button>
+          <div class="header-actions">
+            <el-button
+              type="danger"
+              plain
+              :disabled="!selectedRows.length"
+              @click="handleBatchDelete"
+            >
+              批量删除
+            </el-button>
+            <el-button type="primary" @click="router.push('/docs/create')">
+              上传资料
+            </el-button>
+          </div>
         </div>
       </template>
 
@@ -134,6 +174,8 @@ onMounted(() => {
         :data="list"
         stripe
         style="width: 100%; margin-top: 16px"
+        :row-key="rowKeyDoc"
+        @selection-change="handleSelectionChange"
       >
         <template #empty>
           <el-empty
@@ -146,6 +188,7 @@ onMounted(() => {
             </el-button>
           </el-empty>
         </template>
+        <el-table-column type="selection" width="48" />
         <el-table-column prop="fileName" label="文件名" min-width="180" />
         <el-table-column label="课程名" min-width="140">
           <template #default="{ row }">
@@ -190,6 +233,11 @@ onMounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .error-bar {

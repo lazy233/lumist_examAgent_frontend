@@ -7,7 +7,7 @@ import { getProfile, updateProfile } from '../services/user'
 const authStore = useAuthStore()
 const loading = ref(true)
 
-const displayName = computed(() => authStore.user?.name || '未登录用户')
+const displayName = computed(() => authStore.user?.name || authStore.user?.username || '未登录用户')
 const userId = computed(() => authStore.user?.id || profileForm.userId || '-')
 
 /** 后端题型偏好 -> 前端 value 映射 */
@@ -134,7 +134,7 @@ const fetchProfile = async () => {
       profileForm.age = u.age ?? undefined
       profileForm.gender = u.gender ?? ''
       const prefType = (u.preferredTypes ?? '').trim()
-      profileForm.preferredType = typePreferenceMap[u.preferredTypes ?? ''] ?? 'single_choice'
+      profileForm.preferredType = typePreferenceMap[prefType] ?? 'single_choice'
       profileForm.preferredDifficulty = difficultyMap[u.preferredDifficulty ?? ''] ?? 'medium'
       profileForm.preferredCount = u.preferredCount ?? 5
     }
@@ -290,6 +290,29 @@ onMounted(() => {
 .profile-form :deep(.el-form-item) {
   margin-bottom: 20px;
   min-width: 0;
+}
+.profile-form :deep(.el-form-item__label) {
+  white-space: nowrap;
+}
+.profile-form :deep(.el-form-item__content) {
+  min-width: 0;
+  white-space: nowrap;
+}
+.profile-form :deep(.el-input__inner),
+.profile-form :deep(.el-input-number .el-input__inner),
+.profile-form :deep(.el-select__selected-item) {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.profile-form :deep(.el-radio-group) {
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+.readonly-value {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .readonly-value {

@@ -48,7 +48,7 @@ export interface AnalyzeForConfirmResponse {
 }
 
 export const analyzeForConfirm = (params: AnalyzeForConfirmParams) => {
-  return http.post<AnalyzeForConfirmResponse>('/exercises/analyze', params)
+  return http.post<AnalyzeForConfirmResponse>('/exercises/analyze', params, { timeout: 60000 })
 }
 
 /** 文件分析接口：multipart/form-data，字段 file */
@@ -71,6 +71,10 @@ export interface GenerateFromTextParams {
   questionType: string
   difficulty: string
   count: number
+  /** 分析要点列表 */
+  keyPoints?: string[]
+  /** 分析总结或用户意图 */
+  analysis?: string
 }
 
 export const generateExerciseStreamFromText = async (
@@ -95,6 +99,8 @@ export const generateExerciseStreamFromText = async (
       questionType: params.questionType,
       difficulty: params.difficulty,
       count: params.count,
+      keyPoints: params.keyPoints ?? [],
+      analysis: params.analysis ?? '',
     }),
   })
   if (!res.ok) {
@@ -197,6 +203,9 @@ export interface ExerciseListItem {
   exerciseId: string
   title: string
   count: number
+  questionCount?: number
+  questionType?: QuestionType
+  questionTypeLabel?: string
   difficulty: Difficulty
   score?: number
   createdAt: string

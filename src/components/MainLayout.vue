@@ -8,7 +8,7 @@ const router = useRouter()
 const route = useRoute()
 const authStore = useAuthStore()
 
-const userName = computed(() => authStore.user?.name ?? '用户')
+const userName = computed(() => authStore.user?.name || authStore.user?.username || '用户')
 
 const navItems = [
   { path: '/dashboard', label: '出题中心' },
