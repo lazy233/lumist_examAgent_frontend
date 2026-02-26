@@ -14,6 +14,7 @@ const navItems = [
   { path: '/dashboard', label: '出题中心' },
   { path: '/docs', label: '我的资料' },
   { path: '/exercises', label: '我的练习' },
+  { path: '/chat', label: '智能问答' },
   { path: '/profile', label: '个人中心' },
 ]
 

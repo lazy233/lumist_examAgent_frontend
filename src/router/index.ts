@@ -49,6 +49,33 @@ const routes = [
         component: () => import('../pages/ExerciseDetailPage.vue'),
       },
       {
+        path: 'chat',
+        name: 'Chat',
+        component: () => import('../pages/ChatPage.vue'),
+      },
+      {
+        path: 'chat/config',
+        component: () => import('../pages/chat-config/ChatConfigLayout.vue'),
+        redirect: { name: 'ChatConfigKnowledge' },
+        children: [
+          {
+            path: 'knowledge',
+            name: 'ChatConfigKnowledge',
+            component: () => import('../pages/chat-config/ChatConfigKnowledgePage.vue'),
+          },
+          {
+            path: 'skills',
+            name: 'ChatConfigSkills',
+            component: () => import('../pages/chat-config/ChatConfigSkillsPage.vue'),
+          },
+          {
+            path: 'models',
+            name: 'ChatConfigModels',
+            component: () => import('../pages/chat-config/ChatConfigModelsPage.vue'),
+          },
+        ],
+      },
+      {
         path: 'profile',
         name: 'Profile',
         component: () => import('../pages/ProfilePage.vue'),
